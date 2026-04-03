@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Models (large binary files, download separately)
+models/
+!models/put_models_here.txt
+
+# Output videos and debug images
+output_videos/
+!output_videos/screenshot.jpeg
+
+# Input videos
+input_videos/*.mp4
+input_videos/*.avi
+
+# Training data
+training/data/
+training/*.zip
+training/tennis-ball-detection-6/
+
+# Tracker stubs (video-specific cache)
+tracker_stubs/
+
+# YOLO run outputs
+runs/
+
+# Environment / OS
+.DS_Store
+.envrc
+.venv/
+*.swp
+
+# Partial downloads
+*.part

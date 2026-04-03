@@ -1,0 +1,17 @@
+# 球员颜色：player_id → BGR，球员框和球拍框共用
+PLAYER_COLORS = {
+    1: (255, 165,   0),   # 蓝
+    2: (0,  165, 255),    # 橙
+    3: (255, 255,   0),   # 青
+    4: (200,   0, 200),   # 紫
+}
+
+SINGLE_LINE_WIDTH = 8.23
+DOUBLE_LINE_WIDTH = 10.97
+HALF_COURT_LINE_HEIGHT = 11.88
+SERVICE_LINE_WIDTH = 6.4
+DOUBLE_ALLY_DIFFERENCE = 1.37
+NO_MANS_LAND_HEIGHT = 5.48
+
+PLAYER_1_HEIGHT_METERS = 1.88
+PLAYER_2_HEIGHT_METERS = 1.91
