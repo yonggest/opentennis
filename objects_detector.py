@@ -14,6 +14,9 @@ class ObjectsDetector:
         self.device = device or self._auto_device(model_path)
         print(f"[  detect] loading model: {model_path}  device={self.device}", flush=True)
         self.model = YOLO(model_path, task='detect')
+        name_to_id = {v: k for k, v in self.model.names.items()}
+        self.class_ids = [name_to_id[n] for n in ('person', 'tennis racket', 'sports ball')
+                          if n in name_to_id]
 
     @staticmethod
     def _auto_device(model_path):
@@ -47,7 +50,7 @@ class ObjectsDetector:
             crop = cv2.bitwise_and(frame, frame, mask=mask)[cy1:cy2, cx1:cx2] \
                    if mask is not None else frame[cy1:cy2, cx1:cx2]
             results = self.model.predict(crop, conf=self.conf, imgsz=self.imgsz,
-                                         classes=[0, 38, 32], device=self.device,
+                                         classes=self.class_ids, device=self.device,
                                          verbose=False)[0]
             p, r, b = self._parse(results, offset=(cx1, cy1))
             player_detections.append(p)
