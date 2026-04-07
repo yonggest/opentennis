@@ -1,5 +1,6 @@
 import cv2
 import os
+import subprocess
 import time
 import json
 
@@ -17,7 +18,7 @@ def read_video(video_path):
         ret, frame = cap.read()
         if not ret:
             break
-        frames.append(frame)
+        frames.append(frame.copy())
     fps = cap.get(cv2.CAP_PROP_FPS)
     cap.release()
     return frames, fps
@@ -26,15 +27,25 @@ def read_video(video_path):
 def save_video(frames, path, fps=24):
     out_path = os.path.splitext(path)[0] + '.mp4'
     h, w = frames[0].shape[:2]
-    out = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*'avc1'), fps, (w, h))
+    cmd = [
+        'ffmpeg', '-y',
+        '-f', 'rawvideo', '-vcodec', 'rawvideo',
+        '-pix_fmt', 'bgr24', '-s', f'{w}x{h}', '-r', str(fps),
+        '-i', 'pipe:0',
+        '-vcodec', 'libx264', '-crf', '18', '-preset', 'fast',
+        '-pix_fmt', 'yuv420p',
+        out_path,
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
     total = len(frames)
     nw = len(str(total))
     t0 = time.time()
     for i, frame in enumerate(frames):
-        out.write(frame)
+        proc.stdin.write(frame.tobytes())
         pct = (i + 1) * 100 // total
         print(f"[   video] {i+1:>{nw}}/{total} frames  ({pct:>3}%)", end='\r', flush=True)
-    out.release()
+    proc.stdin.close()
+    proc.wait()
     print(f"[   video] {total:>{nw}}/{total} frames  (100%)  done: {time.time()-t0:>6.1f}s")
     print(f"[   video] saved → {out_path}", flush=True)
 

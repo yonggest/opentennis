@@ -15,6 +15,8 @@ def main():
     parser.add_argument('-m', '--model',       default='models/yolo26x.pt')
     parser.add_argument('-c', '--conf',        type=float, default=0.1)
     parser.add_argument('--imgsz',             type=int,   default=1920)
+    parser.add_argument('-d', '--device',       default=None,
+                        help='推理设备：cpu / cuda / mps / 0 / 1 ...（GPU编号，默认自动选择）')
     parser.add_argument('--annotate',          action='store_true',
                         help='输出凸包外置黑干净视频 + COCO JSON（默认为叠加检测框的预览视频）')
     if len(sys.argv) == 1:
@@ -32,7 +34,7 @@ def main():
     court.predict(frames[0])
     valid_hull = court.get_valid_zone_hull(frames[0].shape, height=6.0)
 
-    objects = ObjectsDetector(args.model, conf=args.conf, imgsz=args.imgsz)
+    objects = ObjectsDetector(args.model, conf=args.conf, imgsz=args.imgsz, device=args.device)
     players, rackets, balls = objects.run(frames, valid_hull=valid_hull)
 
     fh, fw = frames[0].shape[:2]
