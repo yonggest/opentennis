@@ -72,7 +72,7 @@ def main():
         fliplr=0.0,
         mosaic=0.0,
         scale=0.0,
-        mixup=0.1,
+        mixup=0.0,
         copy_paste=0.0,
     )
 
