@@ -178,6 +178,13 @@ def evaluate(model, val_img_dir, val_label_dir, args, gt_names: list[str]):
 def main():
     args = parse_args()
 
+    print("─" * 60)
+    print(f"  model    {args.model}")
+    print(f"  data     {args.data}")
+    print(f"  imgsz    {args.imgsz:<10}  conf     {args.conf:<10}  device  {args.device or 'auto'}")
+    print(f"  limit    {args.limit or 'all'}")
+    print("─" * 60, flush=True)
+
     with open(args.data) as f:
         cfg = yaml.safe_load(f)
 
@@ -188,11 +195,8 @@ def main():
 
     model = YOLO(args.model)
 
-    print(f"模型    : {args.model}")
-    print(f"模型类别: {model.names}")
-    print(f"数据集  : {args.data}")
-    print(f"GT 类别 : {gt_names}")
-    print(f"标注目录: {val_label_dir}\n")
+    print(f"[  model] classes={list(model.names.values())}")
+    print(f"[   data] gt_classes={gt_names}  label_dir={val_label_dir}")
 
     evaluate(model, val_img_dir, val_label_dir, args, gt_names)
 

@@ -461,6 +461,20 @@ class CourtDetector:
         pts = MODEL_KPS_M.reshape(-1, 1, 2)
         return cv2.perspectiveTransform(pts, H).reshape(-1, 2)
 
+    def get_px_per_meter(self):
+        """
+        利用单应矩阵投影两端底线角点，估算图像中心区域的像素/米比例。
+        取远端底线（y=0）和近端底线（y=COURT_L）各自的宽度（均为 COURT_W），
+        对两者取平均，消除透视压缩的影响。
+        必须在 predict() 之后调用。
+        """
+        # MODEL_KPS_M[0]=(0,0), [1]=(COURT_W,0), [2]=(0,COURT_L), [3]=(COURT_W,COURT_L)
+        pts = MODEL_KPS_M[:4].reshape(-1, 1, 2)
+        px = cv2.perspectiveTransform(pts, self._last_H).reshape(-1, 2)
+        far_px_m  = float(np.linalg.norm(px[1] - px[0])) / COURT_W
+        near_px_m = float(np.linalg.norm(px[3] - px[2])) / COURT_W
+        return (far_px_m + near_px_m) / 2.0
+
     def draw_keypoints_on_video(self, video_frames, keypoints):
         return [self.draw_keypoints(f, keypoints) for f in video_frames]
 

@@ -15,6 +15,9 @@ output_videos/
 input_videos/*.mp4
 input_videos/*.avi
 
+# Datasets
+datasets/
+
 # Training data
 training/data/
 training/*.zip

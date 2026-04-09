@@ -34,6 +34,14 @@ def parse_args():
 def main():
     args = parse_args()
 
+    print("─" * 60)
+    print(f"  model    {args.model}")
+    print(f"  data     {args.data}")
+    print(f"  epochs   {args.epochs:<10}  batch    {args.batch:<10}  imgsz   {args.imgsz}")
+    print(f"  lr0      {args.lr0:<10}  freeze   {args.freeze:<10}  device  {args.device or 'auto'}")
+    print(f"  name     {args.name or '(auto)'}")
+    print("─" * 60, flush=True)
+
     if not Path(args.model).exists():
         raise FileNotFoundError(f"找不到模型文件: {args.model}")
     if not Path(args.data).exists():
