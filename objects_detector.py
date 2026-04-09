@@ -26,8 +26,19 @@ class ObjectsDetector:
             return 'cuda'
         return 'cpu'
 
-    def run(self, frames, valid_hull=None):
-        fh, fw = frames[0].shape[:2]
+    def run(self, frames, valid_hull=None, frame_shape=None, total=None):
+        """
+        frames       : list 或任意可迭代对象（生成器）
+        frame_shape  : (height, width)，frames 为生成器时必须提供
+        total        : 总帧数，用于进度显示；frames 为生成器时必须提供
+        """
+        if isinstance(frames, list):
+            fh, fw = frames[0].shape[:2]
+            total  = total or len(frames)
+        else:
+            fh, fw = frame_shape
+            total  = total or 0  # 未知时进度显示为帧计数
+
         if valid_hull is not None:
             bx, by, bw, bh = cv2.boundingRect(valid_hull)
             cx1 = max(0, bx)
@@ -42,8 +53,7 @@ class ObjectsDetector:
             mask = None
 
         player_detections, racket_detections, ball_detections = [], [], []
-        total = len(frames)
-        nw = len(str(total))
+        nw = len(str(total)) if total else 6
         t0 = time.time()
 
         for i, frame in enumerate(frames):
@@ -56,10 +66,14 @@ class ObjectsDetector:
             player_detections.append(p)
             racket_detections.append(r)
             ball_detections.append(b)
-            pct = (i + 1) * 100 // total
-            print(f"[  detect] {i+1:>{nw}}/{total} frames  ({pct:>3}%)", end='\r', flush=True)
+            if total:
+                pct = (i + 1) * 100 // total
+                print(f"[  detect] {i+1:>{nw}}/{total} frames  ({pct:>3}%)", end='\r', flush=True)
+            else:
+                print(f"[  detect] {i+1} frames", end='\r', flush=True)
 
-        print(f"[  detect] {total:>{nw}}/{total} frames  (100%)  done: {time.time()-t0:>6.1f}s")
+        n = len(player_detections)
+        print(f"[  detect] {n} frames  (100%)  done: {time.time()-t0:>6.1f}s")
         return player_detections, racket_detections, ball_detections
 
     def _parse(self, results, offset=(0, 0)):

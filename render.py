@@ -1,11 +1,13 @@
 """
-第二阶段：读取原始视频和检测 JSON，完成球跟踪、遮罩、绘制，输出视频。
+第二阶段：读取检测 JSON，逐帧流式处理原始视频，输出注释视频。
 
 用法：
     python render.py -i <video> -j <video>.json
     python render.py -i <video> -j <video>.json -o output.mp4
 输出：
     <video>_out.mp4（默认）或 -o 指定的路径
+
+内存占用：恒定（单帧 + JSON）——适合超大视频文件（>10 GB）。
 """
 
 import argparse
@@ -17,7 +19,7 @@ from collections import defaultdict
 import cv2
 import numpy as np
 
-from utils import read_video, load_detections, save_video, text_params
+from utils import video_info, iter_frames, open_video_writer, load_detections, text_params
 from ball_tracker import BallTracker
 
 # ITF 标准球场宽度（m），与 court_detector.py 中的 COURT_W 相同
@@ -46,29 +48,15 @@ def _px_per_meter(court_kps):
     return (far_ppm + near_ppm) / 2.0
 
 
-def apply_hull_mask(frames, valid_hull):
-    """凸包外区域置黑。"""
-    fh, fw = frames[0].shape[:2]
-    mask = np.zeros((fh, fw), dtype=np.uint8)
+def _build_hull_mask(valid_hull, height, width):
+    """预计算凸包掩膜，用于逐帧快速遮黑场外区域。"""
+    mask = np.zeros((height, width), dtype=np.uint8)
     cv2.fillPoly(mask, [valid_hull], 255)
-    total = len(frames)
-    nw = len(str(total))
-    t0 = time.time()
-    for i, frame in enumerate(frames):
-        frame[mask == 0] = 0
-        pct = (i + 1) * 100 // total
-        print(f"[    mask] {i+1:>{nw}}/{total} frames  ({pct:>3}%)", end='\r', flush=True)
-    print(f"[    mask] {total:>{nw}}/{total} frames  (100%)  done: {time.time()-t0:>6.1f}s")
+    return mask
 
 
-def draw_preview(frames, valid_hull, players, rackets, balls):
-    """叠加球场轮廓、检测框、网球轨迹箭头和帧号。"""
-    fh = frames[0].shape[0]
-    scale, thick             = text_params(fh)
-    scale_large, thick_large = text_params(fh, base_height=1080)
-    margin = int(fh * 0.028)
-
-    # 预计算各轨迹的全部中心点：{track_id: [(frame_idx, cx, cy), ...]}
+def _build_traj(balls):
+    """预计算各轨迹的全部中心点：{track_id: [(frame_idx, cx, cy), ...]}。"""
     traj = defaultdict(list)
     for fi, frame_balls in enumerate(balls):
         for det in frame_balls:
@@ -76,44 +64,50 @@ def draw_preview(frames, valid_hull, players, rackets, balls):
             if tid is not None:
                 x1, y1, x2, y2 = det['bbox']
                 traj[tid].append((fi, int((x1 + x2) / 2), int((y1 + y2) / 2)))
+    return traj
 
-    total = len(frames)
-    nw = len(str(total))
-    t0 = time.time()
 
-    for i, frame in enumerate(frames):
-        cv2.polylines(frame, [valid_hull], True, (0, 255, 255), 2)
+def _draw_frame(frame, fi, valid_hull, hull_mask,
+                players, rackets, balls, traj,
+                scale, thick, scale_large, thick_large, margin):
+    """原地修改单帧：遮黑 → 绘制球场轮廓、检测框、球轨迹、帧号。"""
+    # 遮黑场外区域
+    frame[hull_mask == 0] = 0
 
-        for det in players[i]:
-            x1, y1, x2, y2 = [int(v) for v in det['bbox']]
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            if det.get('track_id') is not None:
-                cv2.putText(frame, f"P{det['track_id']}", (x1, y1 - 6),
-                            cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 255, 0), thick)
+    # 球场轮廓
+    cv2.polylines(frame, [valid_hull], True, (0, 255, 255), 2)
 
-        for det in rackets[i]:
-            x1, y1, x2, y2 = [int(v) for v in det['bbox']]
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 165, 0), 2)
+    # 球员框
+    for det in players[fi]:
+        x1, y1, x2, y2 = [int(v) for v in det['bbox']]
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        if det.get('track_id') is not None:
+            cv2.putText(frame, f"P{det['track_id']}", (x1, y1 - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 255, 0), thick)
 
-        for tid, pts in traj.items():
-            color   = _traj_color(tid)
-            visible = [(cx, cy) for fi, cx, cy in pts if fi <= i]
-            for k in range(len(visible) - 1):
-                cv2.arrowedLine(frame, visible[k], visible[k + 1], color, 2, tipLength=0.4)
+    # 球拍框
+    for det in rackets[fi]:
+        x1, y1, x2, y2 = [int(v) for v in det['bbox']]
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 165, 0), 2)
 
-        for det in balls[i]:
-            x1, y1, x2, y2 = [int(v) for v in det['bbox']]
-            tid   = det.get('track_id')
-            color = _traj_color(tid) if tid is not None else (128, 128, 128)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, thick)
+    # 球轨迹（已出现的点）
+    for tid, pts in traj.items():
+        color   = _traj_color(tid)
+        visible = [(cx, cy) for fj, cx, cy in pts if fj <= fi]
+        for k in range(len(visible) - 1):
+            cv2.arrowedLine(frame, visible[k], visible[k + 1], color, 2, tipLength=0.4)
 
-        cv2.putText(frame, str(i), (margin, fh - margin),
-                    cv2.FONT_HERSHEY_SIMPLEX, scale_large * 1.5, (0, 255, 0), thick_large)
+    # 当前帧球框
+    for det in balls[fi]:
+        x1, y1, x2, y2 = [int(v) for v in det['bbox']]
+        tid   = det.get('track_id')
+        color = _traj_color(tid) if tid is not None else (128, 128, 128)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, thick)
 
-        pct = (i + 1) * 100 // total
-        print(f"[    draw] {i+1:>{nw}}/{total} frames  ({pct:>3}%)", end='\r', flush=True)
-
-    print(f"[    draw] {total:>{nw}}/{total} frames  (100%)  done: {time.time()-t0:>6.1f}s")
+    # 帧号
+    fh = frame.shape[0]
+    cv2.putText(frame, str(fi), (margin, fh - margin),
+                cv2.FONT_HERSHEY_SIMPLEX, scale_large * 1.5, (0, 255, 0), thick_large)
 
 
 def parse_args():
@@ -139,14 +133,40 @@ def main():
     print(f"  output  {output_path}")
     print("─" * 60, flush=True)
 
-    frames, _  = read_video(args.input)
-    fps, _, _, court_kps, valid_hull, players, rackets, balls = load_detections(args.json)
+    # ── 预加载：JSON（小）＋ 球跟踪 ────────────────────────────────────────────
+    fps, width, height, court_kps, valid_hull, players, rackets, balls = \
+        load_detections(args.json)
 
-    balls = BallTracker.from_video(fps, _px_per_meter(court_kps)).run(balls)
+    balls     = BallTracker.from_video(fps, _px_per_meter(court_kps)).run(balls)
+    hull_mask = _build_hull_mask(valid_hull, height, width)
+    traj      = _build_traj(balls)
 
-    apply_hull_mask(frames, valid_hull)
-    draw_preview(frames, valid_hull, players, rackets, balls)
-    save_video(frames, output_path, fps=fps)
+    scale, thick             = text_params(height)
+    scale_large, thick_large = text_params(height, base_height=1080)
+    margin = int(height * 0.028)
+
+    # ── 单遍流式处理：读帧 → 处理 → 写帧 ─────────────────────────────────────
+    _, _, _, n_frames = video_info(args.input)
+    nw = len(str(n_frames)) if n_frames else 6
+    out_path = os.path.splitext(output_path)[0] + '.mp4'
+    t0 = time.time()
+    count = 0
+
+    with open_video_writer(output_path, fps, width, height) as pipe:
+        for fi, frame in enumerate(iter_frames(args.input)):
+            _draw_frame(frame, fi, valid_hull, hull_mask,
+                        players, rackets, balls, traj,
+                        scale, thick, scale_large, thick_large, margin)
+            pipe.write(frame.tobytes())
+            count = fi + 1
+            if n_frames:
+                pct = count * 100 // n_frames
+                print(f"[   render] {count:>{nw}}/{n_frames} frames  ({pct:>3}%)", end='\r', flush=True)
+            else:
+                print(f"[   render] {count} frames", end='\r', flush=True)
+
+    print(f"[   render] {count:>{nw}}/{count} frames  (100%)  done: {time.time()-t0:>6.1f}s")
+    print(f"[   render] saved → {out_path}", flush=True)
 
 
 if __name__ == '__main__':

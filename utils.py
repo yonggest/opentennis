@@ -1,3 +1,4 @@
+import contextlib
 import cv2
 import json
 import os
@@ -13,41 +14,74 @@ def text_params(frame_height, base_height=1080):
     return scale * 0.6, max(1, round(scale))
 
 
-def read_video(video_path):
+def video_info(video_path):
+    """返回 (fps, width, height, frame_count)，不读取任何帧。"""
     cap = cv2.VideoCapture(video_path)
-    frames = []
+    fps    = cap.get(cv2.CAP_PROP_FPS)
+    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    count  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    return fps, width, height, count
+
+
+def iter_frames(video_path):
+    """逐帧生成器，每次只有一帧在内存中。适合大文件。"""
+    cap = cv2.VideoCapture(video_path)
     while True:
         ret, frame = cap.read()
         if not ret:
             break
-        frames.append(frame.copy())
-    fps = cap.get(cv2.CAP_PROP_FPS)
+        yield frame
     cap.release()
+
+
+def read_video(video_path):
+    """将所有帧加载到内存，返回 (frames, fps)。仅在需要随机访问帧时使用。"""
+    fps, _, _, _ = video_info(video_path)
+    frames = list(iter_frames(video_path))
     return frames, fps
 
 
-def save_video(frames, path, fps=24):
+@contextlib.contextmanager
+def open_video_writer(path, fps, width, height):
+    """
+    上下文管理器，返回可写入原始 BGR24 帧字节的 stdin 管道。
+    退出时自动关闭管道并等待 ffmpeg 完成。
+
+    用法：
+        with open_video_writer(path, fps, w, h) as pipe:
+            pipe.write(frame.tobytes())
+    """
     out_path = os.path.splitext(path)[0] + '.mp4'
-    h, w = frames[0].shape[:2]
     cmd = [
         'ffmpeg', '-y',
         '-f', 'rawvideo', '-vcodec', 'rawvideo',
-        '-pix_fmt', 'bgr24', '-s', f'{w}x{h}', '-r', str(fps),
+        '-pix_fmt', 'bgr24', '-s', f'{width}x{height}', '-r', str(fps),
         '-i', 'pipe:0',
         '-vcodec', 'libx264', '-crf', '18', '-preset', 'fast',
         '-pix_fmt', 'yuv420p',
         out_path,
     ]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        yield proc.stdin
+    finally:
+        proc.stdin.close()
+        proc.wait()
+
+
+def save_video(frames, path, fps=24):
+    h, w = frames[0].shape[:2]
+    out_path = os.path.splitext(path)[0] + '.mp4'
     total = len(frames)
     nw = len(str(total))
     t0 = time.time()
-    for i, frame in enumerate(frames):
-        proc.stdin.write(frame.tobytes())
-        pct = (i + 1) * 100 // total
-        print(f"[   video] {i+1:>{nw}}/{total} frames  ({pct:>3}%)", end='\r', flush=True)
-    proc.stdin.close()
-    proc.wait()
+    with open_video_writer(path, fps, w, h) as pipe:
+        for i, frame in enumerate(frames):
+            pipe.write(frame.tobytes())
+            pct = (i + 1) * 100 // total
+            print(f"[   video] {i+1:>{nw}}/{total} frames  ({pct:>3}%)", end='\r', flush=True)
     print(f"[   video] {total:>{nw}}/{total} frames  (100%)  done: {time.time()-t0:>6.1f}s")
     print(f"[   video] saved → {out_path}", flush=True)
 
@@ -67,17 +101,17 @@ _CATEGORIES = [
     {'id': 3, 'name': 'sports ball',   'supercategory': 'sports'},
 ]
 _CAT_ID = {'person': 1, 'tennis racket': 2, 'sports ball': 3}
-_CAT_NAME = {v: k for k, v in _CAT_ID.items()}
 
 
-def save_coco(frames, players, rackets, balls, path, fps=None, court_kps=None, valid_hull=None):
+def save_coco(width, height, players, rackets, balls, path, fps=None, court_kps=None, valid_hull=None):
     """
     将检测结果保存为 COCO JSON。
 
-    court_kps  : ndarray (28,)   — CourtDetector.predict() 的返回值（可选）
-    valid_hull : ndarray (N,1,2) — CourtDetector.get_valid_zone_hull() 的返回值（可选）
+    width/height : 视频帧尺寸（像素）
+    court_kps    : ndarray (28,)   — CourtDetector.predict() 的返回值（可选）
+    valid_hull   : ndarray (N,1,2) — CourtDetector.get_valid_zone_hull() 的返回值（可选）
     """
-    fh, fw = frames[0].shape[:2]
+    fw, fh = width, height
     images, annotations = [], []
     ann_id = 0
 

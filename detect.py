@@ -12,7 +12,7 @@ import argparse
 import os
 import sys
 
-from utils import read_video, save_coco
+from utils import video_info, iter_frames, save_coco
 from court_detector import CourtDetector
 from objects_detector import ObjectsDetector
 
@@ -45,16 +45,22 @@ def main():
     print(f"  device  {args.device or 'auto'}")
     print("─" * 60, flush=True)
 
-    frames, fps = read_video(args.input)
+    fps, width, height, n_frames = video_info(args.input)
+    first_frame = next(iter_frames(args.input))
 
     court = CourtDetector()
-    kps   = court.predict(frames[0])
-    hull  = court.get_valid_zone_hull(frames[0].shape, height=6.0)
+    kps   = court.predict(first_frame)
+    hull  = court.get_valid_zone_hull(first_frame.shape, height=6.0)
 
     objects = ObjectsDetector(args.model, conf=args.conf, imgsz=args.imgsz, device=args.device)
-    players, rackets, balls = objects.run(frames, valid_hull=hull)
+    players, rackets, balls = objects.run(
+        iter_frames(args.input),
+        valid_hull=hull,
+        frame_shape=(height, width),
+        total=n_frames,
+    )
 
-    save_coco(frames, players, rackets, balls, output_path,
+    save_coco(width, height, players, rackets, balls, output_path,
               fps=fps, court_kps=kps, valid_hull=hull)
 
 
