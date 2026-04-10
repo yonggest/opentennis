@@ -21,9 +21,8 @@ import numpy as np
 
 from utils import video_info, iter_frames, open_video_writer, load_detections, text_params
 from ball_tracker import BallTracker
+from court_detector import MODEL_KPS_M, COURT_LINES, COURT_W as _COURT_W, NET_Y as _NET_Y
 
-# ITF 标准球场宽度（m），与 court_detector.py 中的 COURT_W 相同
-_COURT_W = 10.97
 
 # 每条球轨迹按 track_id 循环取色（BGR）
 _TRAJ_COLORS = [
@@ -55,6 +54,47 @@ def _build_hull_mask(valid_hull, height, width):
     return mask
 
 
+def _compute_H_from_kps(court_kps):
+    """从 14 个关键点反推单应矩阵 H（球场米坐标 → 图像像素）。"""
+    kps_2d = court_kps.reshape(14, 2).astype(np.float32)
+    H, _   = cv2.findHomography(MODEL_KPS_M, kps_2d)
+    return H
+
+
+def _project_line(H, x1, y1, x2, y2):
+    """用 H 将一段球场米坐标线投影为图像像素坐标，返回 (pt1, pt2)。"""
+    pts = cv2.perspectiveTransform(
+        np.array([[[x1, y1]], [[x2, y2]]], dtype=np.float32), H)
+    return tuple(pts[0, 0].astype(int)), tuple(pts[1, 0].astype(int))
+
+
+def _draw_court_kps(frame, court_kps, H):
+    """绘制 14 个球场关键点、球场线条两侧边缘及网线。"""
+    color = (80, 200, 255)   # 淡橙黄，低调但与白色可区分
+
+    if H is not None:
+        # 每条球场线绘制两条边缘（内缘 + 外缘）
+        for (p1, p2, lw_m) in COURT_LINES:
+            half = lw_m / 2
+            if p1[1] == p2[1]:   # 水平线 → 沿 y 方向偏移
+                for dy in (-half, +half):
+                    pt1, pt2 = _project_line(H, p1[0], p1[1]+dy, p2[0], p2[1]+dy)
+                    cv2.line(frame, pt1, pt2, color, 1)
+            else:                 # 垂直线 → 沿 x 方向偏移
+                for dx in (-half, +half):
+                    pt1, pt2 = _project_line(H, p1[0]+dx, p1[1], p2[0]+dx, p2[1])
+                    cv2.line(frame, pt1, pt2, color, 1)
+
+        # 网线
+        pt1, pt2 = _project_line(H, 0, _NET_Y, _COURT_W, _NET_Y)
+        cv2.line(frame, pt1, pt2, color, 1)
+
+    # 关键点小圆
+    kps = court_kps.reshape(14, 2).astype(int)
+    for pt in kps:
+        cv2.circle(frame, tuple(pt), 4, color, -1)
+
+
 def _build_traj(balls):
     """预计算各轨迹的全部中心点：{track_id: [(frame_idx, cx, cy), ...]}。"""
     traj = defaultdict(list)
@@ -67,14 +107,17 @@ def _build_traj(balls):
     return traj
 
 
-def _draw_frame(frame, fi, valid_hull, hull_mask,
+def _draw_frame(frame, fi, court_kps, H, valid_hull, hull_mask,
                 players, rackets, balls, traj,
                 scale, thick, scale_large, thick_large, margin):
     """原地修改单帧：遮黑 → 绘制球场轮廓、检测框、球轨迹、帧号。"""
     # 遮黑场外区域
     frame[hull_mask == 0] = 0
 
-    # 球场轮廓
+    # 球场关键点 + 线条（含网线）
+    _draw_court_kps(frame, court_kps, H)
+
+    # 球场凸包轮廓
     cv2.polylines(frame, [valid_hull], True, (0, 255, 255), 2)
 
     # 球员框
@@ -138,6 +181,7 @@ def main():
         load_detections(args.json)
 
     balls     = BallTracker.from_video(fps, _px_per_meter(court_kps)).run(balls)
+    H         = _compute_H_from_kps(court_kps)
     hull_mask = _build_hull_mask(valid_hull, height, width)
     traj      = _build_traj(balls)
 
@@ -153,7 +197,7 @@ def main():
 
     with open_video_writer(output_path, fps, width, height) as pipe:
         for fi, frame in enumerate(iter_frames(args.input)):
-            _draw_frame(frame, fi, valid_hull, hull_mask,
+            _draw_frame(frame, fi, court_kps, H, valid_hull, hull_mask,
                         players, rackets, balls, traj,
                         scale, thick, scale_large, thick_large, margin)
             pipe.write(frame.tobytes())
