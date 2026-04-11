@@ -14,9 +14,9 @@ import sys
 from pathlib import Path
 
 import cv2
-from PySide6.QtCore import Qt, QPointF, QRectF, QSize, QThread, QTimer, Signal
+from PySide6.QtCore import Qt, QPointF, QRectF, QTimer
 from PySide6.QtGui import (
-    QBrush, QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap, QPolygonF,
+    QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QPolygonF,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFrame, QGraphicsScene, QGraphicsView,
@@ -34,7 +34,7 @@ _PALETTE = [
     ("#33cccc", "#1e5c5c"),
 ]
 _COURT_COLOR = "#f0c040"
-_THUMB_W     = 120   # 缩略图宽度（像素）
+_LIST_W      = 80    # 左侧帧号列表宽度（像素）
 
 
 # ── JSON 加载 ─────────────────────────────────────────────────────────────────
@@ -62,39 +62,6 @@ def load_annotations(json_path: Path) -> tuple[dict, dict, dict | None]:
 
     court = data.get("court")
     return frame_anns, cats, court
-
-
-# ── 后台缩略图加载线程 ────────────────────────────────────────────────────────
-
-class _ThumbLoader(QThread):
-    """顺序读取视频，逐帧发出缩略图（避免随机 seek，速度快）。"""
-    ready = Signal(int, QImage)   # (frame_idx, thumbnail)
-
-    def __init__(self, video_path: Path, total_frames: int):
-        super().__init__()
-        self._path    = video_path
-        self._total   = total_frames
-        self._stopped = False
-
-    def stop(self):
-        self._stopped = True
-
-    def run(self):
-        cap = cv2.VideoCapture(str(self._path))
-        for i in range(self._total):
-            if self._stopped:
-                break
-            ok, bgr = cap.read()
-            if not ok:
-                break
-            h, w  = bgr.shape[:2]
-            th    = max(1, _THUMB_W * h // w)
-            small = cv2.resize(bgr, (_THUMB_W, th), interpolation=cv2.INTER_AREA)
-            rgb   = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-            img   = QImage(rgb.data, _THUMB_W, th,
-                           _THUMB_W * 3, QImage.Format_RGB888).copy()
-            self.ready.emit(i, img)
-        cap.release()
 
 
 # ── View（缩放/平移） ─────────────────────────────────────────────────────────
@@ -152,12 +119,6 @@ class BrowseApp(QMainWindow):
         self._play_timer.timeout.connect(self._play_next)
 
         self._build_ui()
-
-        # 后台加载缩略图
-        self._thumb_loader = _ThumbLoader(video_path, self.total_frames)
-        self._thumb_loader.ready.connect(self._on_thumb_ready)
-        self._thumb_loader.start()
-
         self._goto_frame(0)
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -207,21 +168,20 @@ class BrowseApp(QMainWindow):
         self.status_lbl = QLabel("", styleSheet="color:#4ec9b0; font:11pt Menlo;")
         tl.addWidget(self.status_lbl)
 
-        # 左侧缩略图列表
-        thumb_h = _THUMB_W * 9 // 16
+        # 左侧帧号列表
         self.thumb_list = QListWidget()
-        self.thumb_list.setFixedWidth(_THUMB_W + 24)
-        self.thumb_list.setIconSize(QSize(_THUMB_W, thumb_h))
+        self.thumb_list.setFixedWidth(_LIST_W)
         self.thumb_list.setUniformItemSizes(True)
         self.thumb_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.thumb_list.setStyleSheet("""
             QListWidget { background:#141414; border:none; outline:none; }
-            QListWidget::item { color:#555; font:9pt Menlo;
-                                border-bottom:1px solid #222; padding:2px 0; }
+            QListWidget::item { color:#555; font:9pt Menlo; text-align:right;
+                                border-bottom:1px solid #1c1c1c; padding:2px 6px; }
             QListWidget::item:selected { background:#2a4a6e; color:#ccc; }
         """)
         for i in range(self.total_frames):
             item = QListWidgetItem(str(i))
+            item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.thumb_list.addItem(item)
         self.thumb_list.currentRowChanged.connect(self._on_list_select)
 
@@ -289,7 +249,7 @@ class BrowseApp(QMainWindow):
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self.thumb_list)
         splitter.addWidget(right)
-        splitter.setSizes([_THUMB_W + 24, 1280])
+        splitter.setSizes([_LIST_W, 1280])
         splitter.setHandleWidth(2)
         splitter.setStyleSheet("QSplitter::handle { background:#333; }")
 
@@ -298,14 +258,6 @@ class BrowseApp(QMainWindow):
         cl.addWidget(toolbar)
         cl.addWidget(splitter, 1)
         self.setCentralWidget(central)
-
-    # ── 缩略图 ────────────────────────────────────────────────────────────────
-
-    def _on_thumb_ready(self, idx: int, img: QImage):
-        item = self.thumb_list.item(idx)
-        if item:
-            item.setIcon(QIcon(QPixmap.fromImage(img)))
-            item.setText("")
 
     # ── 帧导航 ────────────────────────────────────────────────────────────────
 
@@ -487,8 +439,6 @@ class BrowseApp(QMainWindow):
 
     def closeEvent(self, event):
         self._play_timer.stop()
-        self._thumb_loader.stop()
-        self._thumb_loader.wait()
         self.cap.release()
         super().closeEvent(event)
 
