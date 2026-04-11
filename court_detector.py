@@ -71,9 +71,9 @@ COURT_LINES = [
 
 class CourtDetector:
     """
-    接口与其他检测器相同：
-        kps = detector.predict(frame)   # shape (28,)
-        img = detector.draw_keypoints_on_video(frames, kps)
+    主接口：
+        kps  = detector.predict(frame)            # shape (28,) — 14 关键点
+        hull = detector.get_valid_zone_hull(...)   # 球场有效区域凸包
     """
 
     def __init__(self, scale: int = 40, seg_model: str = None):
@@ -177,8 +177,7 @@ class CourtDetector:
         dist_map2 = self._build_dist_map(frame, line_mask)
         H_opt2    = self._optimize(H_opt, dist_map2, frame.shape)
 
-        self._init_H = H_init  # 供调试用：优化前的初始估计
-        self._last_H = H_opt2  # 供调试用
+        self._last_H = H_opt2
         kps = self._project_keypoints(H_opt2)
         return kps.flatten()
 
@@ -332,8 +331,8 @@ class CourtDetector:
         if valid.sum() < 100:
             return 1e6
         p    = proj[valid]
-        xi   = np.clip(p[:, 0].astype(np.int32), 0, w_img - 1)
-        yi   = np.clip(p[:, 1].astype(np.int32), 0, h_img - 1)
+        xi   = p[:, 0].astype(np.int32)
+        yi   = p[:, 1].astype(np.int32)
         vals = dist_map[yi, xi]
         if weights is not None:
             w = weights[valid]
@@ -469,27 +468,10 @@ class CourtDetector:
                 best_quad = q
         return best_quad
 
-    # ── 8. 投影关键点 & 可视化 ─────────────────────────────────────
+    # ── 9. 投影关键点 ────────────────────────────────────────────────
     def _project_keypoints(self, H):
         pts = MODEL_KPS_M.reshape(-1, 1, 2)
         return cv2.perspectiveTransform(pts, H).reshape(-1, 2)
-
-    def get_px_per_meter(self):
-        """
-        利用单应矩阵投影两端底线角点，估算图像中心区域的像素/米比例。
-        取远端底线（y=0）和近端底线（y=COURT_L）各自的宽度（均为 COURT_W），
-        对两者取平均，消除透视压缩的影响。
-        必须在 predict() 之后调用。
-        """
-        # MODEL_KPS_M[0]=(0,0), [1]=(COURT_W,0), [2]=(0,COURT_L), [3]=(COURT_W,COURT_L)
-        pts = MODEL_KPS_M[:4].reshape(-1, 1, 2)
-        px = cv2.perspectiveTransform(pts, self._last_H).reshape(-1, 2)
-        far_px_m  = float(np.linalg.norm(px[1] - px[0])) / COURT_W
-        near_px_m = float(np.linalg.norm(px[3] - px[2])) / COURT_W
-        return (far_px_m + near_px_m) / 2.0
-
-    def draw_keypoints_on_video(self, video_frames, keypoints):
-        return [self.draw_keypoints(f, keypoints) for f in video_frames]
 
     def get_valid_zone_hull(self, image_shape, expand=1.5, height=7.0):
         """
@@ -551,74 +533,3 @@ class CourtDetector:
         hull = cv2.convexHull(pts2d.reshape(-1, 1, 2))
         return hull.astype(np.int32)
 
-    def draw_frame(self, frame, alpha=0.8):
-        """原地把球场线条叠加到 frame 上（与 tracker.draw_bboxes_frame 接口一致）。
-        alpha: 线条不透明度（0=完全透明，1=完全覆盖）
-        """
-        if not hasattr(self, '_court_overlay') or self._court_overlay.shape != frame.shape:
-            self._court_overlay = self.draw_court(np.zeros_like(frame))
-            self._court_mask = self._court_overlay.any(axis=2)  # 线条区域 bool mask
-        frame[self._court_mask] = cv2.addWeighted(
-            frame, 1 - alpha, self._court_overlay, alpha, 0
-        )[self._court_mask]
-
-    def draw_court(self, image, color=(0, 200, 0)):
-        """用 H 把 COURT_LINES 每条线的实际宽度矩形投影到图像上。"""
-        if not hasattr(self, '_last_H'):
-            return image.copy()
-        img = image.copy()
-        H = self._last_H
-        for (p1, p2, w) in COURT_LINES:
-            x1, y1 = p1
-            x2, y2 = p2
-            hw = w / 2
-            # 所有线条均为水平或垂直，按方向计算四角
-            if abs(x2 - x1) > abs(y2 - y1):   # 水平线
-                corners = np.array([[x1, y1 - hw], [x2, y2 - hw],
-                                    [x2, y2 + hw], [x1, y1 + hw]], dtype=np.float32)
-            else:                               # 垂直线
-                corners = np.array([[x1 - hw, y1], [x2 - hw, y2],
-                                    [x2 + hw, y2], [x1 + hw, y1]], dtype=np.float32)
-            proj = cv2.perspectiveTransform(corners.reshape(-1, 1, 2), H).reshape(-1, 2)
-            pts = proj.astype(np.int32)
-            cv2.fillPoly(img, [pts], color)
-        return img
-
-    def draw_keypoints(self, image, keypoints, color=(0, 255, 0)):
-        img = image.copy()
-        # Draw court lines (1px)
-        line_pairs = [
-            (0, 2), (1, 3),           # doubles sidelines
-            (4, 5), (6, 7),           # singles sidelines
-            (0, 1), (2, 3),           # baselines
-            (8, 9), (10, 11),         # service lines
-            (12, 13),                 # center service line
-        ]
-        for p1, p2 in line_pairs:
-            x1, y1 = int(keypoints[p1*2]), int(keypoints[p1*2+1])
-            x2, y2 = int(keypoints[p2*2]), int(keypoints[p2*2+1])
-            cv2.line(img, (x1, y1), (x2, y2), color, 1)
-        # Draw cross markers at each keypoint (1px)
-        s = 6
-        for i in range(0, len(keypoints), 2):
-            x, y = int(keypoints[i]), int(keypoints[i+1])
-            cv2.line(img, (x-s, y), (x+s, y), color, 1)
-            cv2.line(img, (x, y-s), (x, y+s), color, 1)
-        return img
-
-    # ── 10. 调试 ─────────────────────────────────────────────────
-    def debug_overlay(self, frame, H, path="output_videos/template_debug.jpg"):
-        h_img, w_img = frame.shape[:2]
-        vis = frame.copy()
-
-        # 把模板白线投影到图像上
-        pts = self._template_pts_m.reshape(-1, 1, 2)
-        proj = cv2.perspectiveTransform(pts, H).reshape(-1, 2)
-        valid = ((proj[:,0] >= 0) & (proj[:,0] < w_img) &
-                 (proj[:,1] >= 0) & (proj[:,1] < h_img))
-        for x, y in proj[valid]:
-            vis[int(y), int(x)] = (0, 255, 0)
-
-        cv2.imwrite(path, vis, [cv2.IMWRITE_JPEG_QUALITY, 92])
-        print(f"[   court] 调试图: {path}")
-        return vis

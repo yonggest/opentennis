@@ -1,8 +1,9 @@
-from ultralytics import YOLO
 import time
+
 import cv2
 import numpy as np
 import torch
+from ultralytics import YOLO
 
 
 class ObjectsDetector:

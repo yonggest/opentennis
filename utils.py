@@ -3,8 +3,6 @@ import cv2
 import json
 import os
 import subprocess
-import time
-
 import numpy as np
 
 
@@ -36,13 +34,6 @@ def iter_frames(video_path):
     cap.release()
 
 
-def read_video(video_path):
-    """将所有帧加载到内存，返回 (frames, fps)。仅在需要随机访问帧时使用。"""
-    fps, _, _, _ = video_info(video_path)
-    frames = list(iter_frames(video_path))
-    return frames, fps
-
-
 @contextlib.contextmanager
 def open_video_writer(path, fps, width, height):
     """
@@ -69,21 +60,6 @@ def open_video_writer(path, fps, width, height):
     finally:
         proc.stdin.close()
         proc.wait()
-
-
-def save_video(frames, path, fps=24):
-    h, w = frames[0].shape[:2]
-    out_path = os.path.splitext(path)[0] + '.mp4'
-    total = len(frames)
-    nw = len(str(total))
-    t0 = time.time()
-    with open_video_writer(path, fps, w, h) as pipe:
-        for i, frame in enumerate(frames):
-            pipe.write(frame.tobytes())
-            pct = (i + 1) * 100 // total
-            print(f"[   video] {i+1:>{nw}}/{total} frames  ({pct:>3}%)", end='\r', flush=True)
-    print(f"[   video] {total:>{nw}}/{total} frames  (100%)  done: {time.time()-t0:>6.1f}s")
-    print(f"[   video] saved → {out_path}", flush=True)
 
 
 # ── COCO JSON 格式 ────────────────────────────────────────────────────────────

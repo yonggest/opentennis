@@ -286,7 +286,7 @@ class BrowseApp(QMainWindow):
         self.frame_lbl.setText(f"{self.current_frame} / {self.total_frames - 1}")
         self._update_status()
 
-        # 同步缩略图列表（blockSignals 防止回调 _on_list_select 形成循环）
+        # 同步帧号列表（blockSignals 防止回调 _on_list_select 形成循环）
         self.thumb_list.blockSignals(True)
         self.thumb_list.setCurrentRow(self.current_frame)
         self.thumb_list.blockSignals(False)
