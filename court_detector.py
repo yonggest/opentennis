@@ -214,12 +214,10 @@ class CourtDetector:
     def _build_line_mask(self, H, img_shape):
         """
         将所有球场线条（COURT_LINES + 网线）通过单应矩阵 H 投影到图像坐标，
-        以"自然线宽 × 2"（即面积扩大一倍）的粗细绘制，返回带状二值 mask。
+        按自然线宽绘制，再用形态学膨胀扩展容差带，返回带状二值 mask。
 
-        为何面积 ×2：
-          - 自然线宽（lw_m × ppm）覆盖实际白线像素的理论范围
-          - 扩大一倍作为容差，吸收 H 的残余误差和透视不均匀
-          - 同时保持 mask 足够紧致，排除远离线条的场地表面（假白点来源）
+        膨胀半径 = LINE_W（5 cm）换算成像素，吸收 H 的残余误差和透视不均匀，
+        同时保持 mask 足够紧致，排除远离线条的场地表面（假白点来源）。
 
         px/m 估算：取远端底线（y=0）和近端底线（y=COURT_L）在图像中的
         像素宽度各除以 COURT_W，取平均，抵消透视压缩的影响。
@@ -234,15 +232,19 @@ class CourtDetector:
         ppm = (np.linalg.norm(px[1] - px[0]) / COURT_W +
                np.linalg.norm(px[3] - px[2]) / COURT_W) / 2.0
 
-        # 逐条投影线条，厚度 = 自然线宽 × 2（面积×2）
+        # 按自然线宽绘制
         all_lines = list(COURT_LINES) + [([0, NET_Y], [COURT_W, NET_Y], LINE_W)]
         for (p1, p2, lw_m) in all_lines:
             pts = np.array([[[p1[0], p1[1]], [p2[0], p2[1]]]], dtype=np.float32)
             proj = cv2.perspectiveTransform(pts, H)[0].astype(int)
-            thickness = max(2, round(lw_m * ppm * 2))
+            thickness = max(1, round(lw_m * ppm))
             cv2.line(mask, tuple(proj[0]), tuple(proj[1]), 255, thickness)
 
-        return mask
+        # 膨胀：扩展 LINE_W（5 cm）对应的像素距离
+        r  = max(1, round(LINE_W * ppm))
+        ks = 2 * r + 1
+        k  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ks, ks))
+        return cv2.dilate(mask, k)
 
     # ── 4. 构建距离场 ──────────────────────────────────────────────
     def _build_dist_map(self, frame, court_mask, cap=None):
