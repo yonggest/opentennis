@@ -166,7 +166,8 @@ class CourtDetector:
         # 步骤1：YOLO seg 粗略初始化
         court_mask = self._get_court_mask(frame)
         dist_map   = self._build_dist_map(frame, court_mask)
-        H_init     = self._get_hough_H(frame, court_mask, dist_map)
+        H_init, c_init = self._yolo_seg_init(frame, dist_map)
+        print(f"[   court] YOLO seg init:   cost={c_init:.3f}")
 
         # 步骤2：粗 dist_map 下的 Nelder-Mead 精调
         H_opt = self._optimize(H_init, dist_map, frame.shape)
@@ -178,7 +179,7 @@ class CourtDetector:
 
         self._init_H = H_init  # 供调试用：优化前的初始估计
         self._last_H = H_opt2  # 供调试用
-        kps = self._project_keypoints(H_opt2, frame.shape)
+        kps = self._project_keypoints(H_opt2)
         return kps.flatten()
 
     # ── 3. 球场 mask ────────────────────────────────────────────────
@@ -210,7 +211,7 @@ class CourtDetector:
         k  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ks, ks))
         return cv2.dilate(mask, k)
 
-    # ── 4a. 基于优化后 H 构建球场线条 mask ─────────────────────────
+    # ── 4. 基于优化后 H 构建球场线条 mask ──────────────────────────
     def _build_line_mask(self, H, img_shape):
         """
         将所有球场线条（COURT_LINES + 网线）通过单应矩阵 H 投影到图像坐标，
@@ -246,7 +247,7 @@ class CourtDetector:
         k  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ks, ks))
         return cv2.dilate(mask, k)
 
-    # ── 4. 构建距离场 ──────────────────────────────────────────────
+    # ── 5. 构建距离场 ──────────────────────────────────────────────
     def _build_dist_map(self, frame, court_mask, cap=None):
         """
         在 court_mask 范围内检测白线像素，对非白线像素做距离变换，
@@ -270,8 +271,35 @@ class CourtDetector:
                    cv2.bitwise_not(white_in), cv2.DIST_L2, 5)
         return np.minimum(dist, cap).astype(np.float32)
 
-    # ── 5. 代价函数：模板白线像素到实际边缘的平均距离 ─────────────
-    def _cost(self, H, dist_map):
+    # ── 6. 代价函数：模板白线像素到实际边缘的平均距离 ─────────────
+    def _compute_weights(self, H):
+        """
+        计算模板各点的透视权重，正比于该点投影到图像后的局部面积放大倍数
+        （单应矩阵在该点的 Jacobian 行列式绝对值）。
+
+        近端点在图像中占更大面积 → 权重更高，与肉眼感知一致。
+        权重归一化为均值 = 1，使代价函数量纲不变。
+        """
+        pts  = self._template_pts_m                          # (N, 2)
+        ones = np.ones((len(pts), 1), dtype=np.float32)
+        ph   = (H @ np.column_stack([pts, ones]).T).T        # (N, 3)
+        w    = ph[:, 2]
+        u    = ph[:, 0] / w
+        v    = ph[:, 1] / w
+        # Jacobian 元素 ∂(u,v)/∂(x,y)
+        J00  = (H[0, 0] - u * H[2, 0]) / w
+        J01  = (H[0, 1] - u * H[2, 1]) / w
+        J10  = (H[1, 0] - v * H[2, 0]) / w
+        J11  = (H[1, 1] - v * H[2, 1]) / w
+        jac  = np.abs(J00 * J11 - J01 * J10).astype(np.float32)
+        mean = jac.mean()
+        return (jac / mean).astype(np.float32) if mean > 0 else None
+
+    def _cost(self, H, dist_map, weights=None):
+        """
+        计算代价：模板白线像素投影后在 dist_map 上的（加权）平均距离。
+        weights: 与 _template_pts_m 等长的权重数组（None = 均匀权重）。
+        """
         h_img, w_img = dist_map.shape
 
         # 检查投影关键点合法性
@@ -296,75 +324,24 @@ class CourtDetector:
         if far_c[:, 1].mean() >= near_c[:, 1].mean():
             return 1e6
 
-        # 主代价：模板白线像素到最近边缘的平均距离
+        # 主代价：模板白线像素到最近边缘的（加权）平均距离
         pts = self._template_pts_m.reshape(-1, 1, 2)
         proj = cv2.perspectiveTransform(pts, H).reshape(-1, 2)
         valid = ((proj[:, 0] >= 0) & (proj[:, 0] < w_img - 1) &
                  (proj[:, 1] >= 0) & (proj[:, 1] < h_img - 1))
         if valid.sum() < 100:
             return 1e6
-        p  = proj[valid]
-        xi = np.clip(p[:, 0].astype(np.int32), 0, w_img - 1)
-        yi = np.clip(p[:, 1].astype(np.int32), 0, h_img - 1)
-        return float(dist_map[yi, xi].mean())
+        p    = proj[valid]
+        xi   = np.clip(p[:, 0].astype(np.int32), 0, w_img - 1)
+        yi   = np.clip(p[:, 1].astype(np.int32), 0, h_img - 1)
+        vals = dist_map[yi, xi]
+        if weights is not None:
+            w = weights[valid]
+            ws = w.sum()
+            return float((vals * w).sum() / ws) if ws > 0 else 1e6
+        return float(vals.mean())
 
-    # ── 5b. 相机模型初始估计：扫描物理参数 ────────────────────────────
-    def _camera_model_init(self, dist_map, img_shape):
-        """
-        扫描摄像机的物理安装参数（离底线距离、高度、俯仰角、等效焦距），
-        用小孔相机模型生成候选 H，选代价最小的作为优化初始值。
-
-        世界坐标系：x 横向（左→右），y 纵向（远端=0 → 近端=COURT_L），z 竖直向上。
-        摄像机横向居中，位于近端底线之后。
-        """
-        h_img, w_img = img_shape[:2]
-        cx, cy = w_img / 2.0, h_img / 2.0
-        world_up = np.array([0.0, 0.0, 1.0])
-
-        # 扫描范围：离底线距离(m)、离地高度(m)、俯仰角(°)、焦距(× 图像宽度)
-        dists   = [3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
-        heights = [2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
-        pitches = [8, 10, 12, 15, 18, 20, 22, 25]   # 俯视角（度）
-        f_scales = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.4]
-
-        best_H    = None
-        best_cost = 1e9
-        best_params = (dists[0], heights[0], pitches[0], f_scales[0])
-
-        for dist in dists:
-            for height in heights:
-                cam_pos = np.array([COURT_W / 2, COURT_L + dist, height])
-
-                for pitch_deg in pitches:
-                    pitch = np.radians(pitch_deg)
-                    # 相机朝向：水平向前（-y）+ 俯视（-z）
-                    z_c = np.array([0.0, -np.cos(pitch), -np.sin(pitch)])
-
-                    x_c = np.cross(world_up, z_c)
-                    x_c /= np.linalg.norm(x_c)
-                    y_c = np.cross(x_c, z_c)
-
-                    R = np.array([x_c, y_c, z_c])
-                    t = -R @ cam_pos
-
-                    for f_s in f_scales:
-                        f = f_s * w_img
-                        K = np.array([[f, 0, cx], [0, f, cy], [0, 0, 1.0]])
-                        H = (K @ np.column_stack([R[:, 0], R[:, 1], t])).astype(np.float32)
-
-                        c = self._cost(H, dist_map)
-                        if c < best_cost:
-                            best_cost   = c
-                            best_H      = H.copy()
-                            best_params = (dist, height, pitch_deg, f_s)
-
-        d, h, p, fs = best_params
-        print(f"[   court] camera-model scan: cost={best_cost:.3f}  "
-              f"dist={d:.0f}m  height={h:.1f}m  pitch={p:.0f}deg  "
-              f"f_scale={fs:.2f}", flush=True)
-        return best_H if best_H is not None else np.eye(3, dtype=np.float32)
-
-    # ── 6. 优化：角点参数化 + Nelder-Mead 精调 ──────────────────────
+    # ── 7. 优化：角点参数化 + Nelder-Mead 精调 ──────────────────────
     def _optimize(self, H_hint, dist_map, img_shape):
         """
         把 4 个双打角的图像坐标作为优化变量（8个参数），
@@ -382,6 +359,12 @@ class CourtDetector:
             dst = np.array(params, dtype=np.float32).reshape(4, 2)
             H, _ = cv2.findHomography(SRC_M, dst, method=0)
             return H
+
+        if H_hint is None:
+            raise RuntimeError("所有初始化方法均失败，无法检测球场")
+
+        # 权重固定在优化开始前计算（用 H_hint），整个过程不变
+        weights = self._compute_weights(H_hint)
 
         def corners_cost(params):
             """4-角参数化代价（含拓扑约束）"""
@@ -401,13 +384,10 @@ class CourtDetector:
                 for i in range(n)))
             if area < 0.05 * w_img * h_img: return 1e6
             H = corners_to_H(params)
-            return 1e6 if H is None else self._cost(H, dist_map)
-
-        if H_hint is None:
-            raise RuntimeError("所有初始化方法均失败，无法检测球场")
+            return 1e6 if H is None else self._cost(H, dist_map, weights)
 
         best_H    = H_hint
-        best_cost = self._cost(H_hint, dist_map)
+        best_cost = self._cost(H_hint, dist_map, weights)
         print(f"[   court] init H cost: {best_cost:.3f}")
 
         # Nelder-Mead 精调：用 4-角参数化，防止 H 漂移到退化解
@@ -417,12 +397,12 @@ class CourtDetector:
                      options={'maxiter': 8000, 'xatol': 0.5,
                               'fatol': 0.01, 'adaptive': True})
         H_nm = corners_to_H(r.x)
-        c_nm = self._cost(H_nm, dist_map) if H_nm is not None else 1e9
+        c_nm = self._cost(H_nm, dist_map, weights) if H_nm is not None else 1e9
         print(f"[   court] Nelder-Mead refine: {best_cost:.3f} -> {c_nm:.3f}  ({r.nit} iters)")
 
         return (H_nm if c_nm < best_cost else best_H).reshape(3, 3)
 
-    # ── 8. 初始单应矩阵：YOLO seg（主）──────────────────────────────
+    # ── 8. 初始单应矩阵：YOLO seg ────────────────────────────────────
     def _yolo_seg_init(self, frame, dist_map):
         """
         用 YOLO seg 模型检测球场多边形 mask，
@@ -489,13 +469,8 @@ class CourtDetector:
                 best_quad = q
         return best_quad
 
-    def _get_hough_H(self, frame, court_mask, dist_map):
-        H_seg, c_seg = self._yolo_seg_init(frame, dist_map)
-        print(f"[   court] YOLO seg init:   cost={c_seg:.3f}")
-        return H_seg
-
-    # ── 9. 投影关键点 & 可视化 ─────────────────────────────────────
-    def _project_keypoints(self, H, img_shape):
+    # ── 8. 投影关键点 & 可视化 ─────────────────────────────────────
+    def _project_keypoints(self, H):
         pts = MODEL_KPS_M.reshape(-1, 1, 2)
         return cv2.perspectiveTransform(pts, H).reshape(-1, 2)
 
@@ -631,7 +606,7 @@ class CourtDetector:
             cv2.line(img, (x, y-s), (x, y+s), color, 1)
         return img
 
-    # ── 10. 调试：保存可视化图 ────────────────────────────────────
+    # ── 10. 调试 ─────────────────────────────────────────────────
     def debug_overlay(self, frame, H, path="output_videos/template_debug.jpg"):
         h_img, w_img = frame.shape[:2]
         vis = frame.copy()
