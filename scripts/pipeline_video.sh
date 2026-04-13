@@ -11,8 +11,8 @@ set -euo pipefail
 
 DATASET_DIR="../datasets/tennis-video-26"
 OUTPUT_ROOT="runs/in-out/tennis-video-26.out"
-OBJECT_MODEL="models/best-1920.mlpackage"
-COURT_MODEL="models/court_seg.pt"
+OBJECT_MODEL="models/yolo26x-finetuned.pt"
+COURT_MODEL="models/yolov8n-seg-finetuned.pt"
 
 if [[ $# -eq 0 ]]; then
   echo "用法: bash scripts/pipeline_video.sh <视频文件名>" >&2

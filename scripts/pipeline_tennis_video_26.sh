@@ -12,8 +12,10 @@ set -uo pipefail
 
 DATASET_DIR="../datasets/tennis-video-26"
 OUTPUT_ROOT="runs/in-out/tennis-video-26.out"
-OBJECT_MODEL="models/best-1920.mlpackage"
-COURT_MODEL="models/court_seg.pt"
+OUTPUT_ROOT="runs/in-out/tennis-video-26.out"
+OBJECT_MODEL="models/yolo26x-finetuned.pt"
+COURT_MODEL="models/yolov8n-seg-finetuned.pt"
+
 DRY_RUN=false
 
 for arg in "$@"; do
