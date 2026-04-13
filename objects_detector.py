@@ -33,25 +33,25 @@ class ObjectsDetector:
         total = total or (len(frames) if isinstance(frames, list) else 0)
 
         player_detections, racket_detections, ball_detections = [], [], []
-        nw = len(str(total)) if total else 6
+        frame_num_width = len(str(total)) if total else 6
         t0 = time.time()
 
         for i, frame in enumerate(frames):
             results = self.model.predict(frame, conf=self.conf, imgsz=self.imgsz,
                                          classes=self.class_ids, device=self.device,
                                          verbose=False, save=False)[0]
-            p, r, b = self._parse(results)
-            player_detections.append(p)
-            racket_detections.append(r)
-            ball_detections.append(b)
+            players, rackets, balls = self._parse(results)
+            player_detections.append(players)
+            racket_detections.append(rackets)
+            ball_detections.append(balls)
             if total:
                 pct = (i + 1) * 100 // total
-                print(f"[  detect] {i+1:>{nw}}/{total} frames  ({pct:>3}%)", end='\r', flush=True)
+                print(f"[  detect] {i+1:>{frame_num_width}}/{total} frames  ({pct:>3}%)", end='\r', flush=True)
             else:
                 print(f"[  detect] {i+1} frames", end='\r', flush=True)
 
-        n = len(player_detections)
-        print(f"[  detect] {n} frames  (100%)  done: {time.time()-t0:>6.1f}s")
+        n_frames = len(player_detections)
+        print(f"[  detect] {n_frames} frames  (100%)  done: {time.time()-t0:>6.1f}s")
         return player_detections, racket_detections, ball_detections
 
     def _parse(self, results):

@@ -69,7 +69,7 @@ def open_video_writer(path, fps, width, height):
 #   annotations  : [{id, image_id, category_id, bbox [x,y,w,h], area, iscrowd, score}, ...]
 #   categories   : [{id, name, supercategory}, ...]
 #   fps          : float
-#   court        : {keypoints: [[x,y]×14], valid_hull: [[x,y]×N]}  （可选）
+#   court        : {keypoints, ground_hull, volume_hull, vol_bottom_pts, vol_top_pts}  （可选）
 
 _CATEGORIES = [
     {'id': 1, 'name': 'person',        'supercategory': 'person'},
@@ -79,34 +79,64 @@ _CATEGORIES = [
 _CAT_ID = {'person': 1, 'tennis racket': 2, 'sports ball': 3}
 
 
-def save_coco(width, height, players, rackets, balls, path, fps=None, court_kps=None, valid_hull=None):
+def _serialize_court(court):
+    """将 court dict 的 numpy 数组序列化为 JSON 可写格式。"""
+    return {
+        'keypoints':      np.array(court['keypoints']).reshape(14, 2).tolist(),
+        'ground_hull':    np.array(court['ground_hull']).reshape(-1, 2).tolist(),
+        'volume_hull':    np.array(court['volume_hull']).reshape(-1, 2).tolist(),
+        'vol_bottom_pts': np.array(court['vol_bottom_pts']).tolist(),
+        'vol_top_pts':    np.array(court['vol_top_pts']).tolist(),
+    }
+
+
+def _deserialize_court(raw):
+    """将 JSON 中的 court dict 恢复为 numpy 数组。"""
+    return {
+        'keypoints':      np.array(raw.get('keypoints',      [[0,0]]*14), dtype=np.float32).flatten(),
+        'ground_hull':    np.array(raw.get('ground_hull',    [[0,0]]*4),  dtype=np.int32).reshape(-1, 1, 2),
+        'volume_hull':    np.array(raw.get('volume_hull',    [[0,0]]),    dtype=np.int32).reshape(-1, 1, 2),
+        'vol_bottom_pts': np.array(raw.get('vol_bottom_pts', [[0,0]]*4), dtype=np.float32),
+        'vol_top_pts':    np.array(raw.get('vol_top_pts',    [[0,0]]*4), dtype=np.float32),
+    }
+
+
+def save_coco(width, height, players, rackets, balls, path, fps=None, court=None):
     """
     将检测结果保存为 COCO JSON。
 
     width/height : 视频帧尺寸（像素）
-    court_kps    : ndarray (28,)   — CourtDetector.predict() 的返回值（可选）
-    valid_hull   : ndarray (N,1,2) — CourtDetector.get_valid_zone_hull() 的返回值（可选）
+    court        : dict，包含球场关键点和缓冲区凸包（可选）：
+                     keypoints      ndarray (28,)    — 14 个关键点
+                     ground_hull    ndarray (4,1,2)  — 地面缓冲区四边形
+                     volume_hull    ndarray (N,1,2)  — 立方体凸包
+                     vol_bottom_pts ndarray (4,2)    — 立方体底面角点
+                     vol_top_pts    ndarray (4,2)    — 立方体顶面角点
     """
-    fw, fh = width, height
     images, annotations = [], []
-    ann_id = 0
+    annotation_id = 0
 
-    for frame_id, (p_list, r_list, b_list) in enumerate(zip(players, rackets, balls)):
-        images.append({'id': frame_id, 'width': fw, 'height': fh, 'frame_id': frame_id})
-        for cat_name, dets in [('person', p_list), ('tennis racket', r_list), ('sports ball', b_list)]:
+    for frame_id, (player_dets, racket_dets, ball_dets) in enumerate(zip(players, rackets, balls)):
+        images.append({'id': frame_id, 'width': width, 'height': height, 'frame_id': frame_id})
+        for category_name, dets in [('person', player_dets), ('tennis racket', racket_dets), ('sports ball', ball_dets)]:
             for det in dets:
                 x1, y1, x2, y2 = det['bbox']
-                bw, bh = x2 - x1, y2 - y1
-                annotations.append({
-                    'id':          ann_id,
+                box_w, box_h = x2 - x1, y2 - y1
+                ann = {
+                    'id':          annotation_id,
                     'image_id':    frame_id,
-                    'category_id': _CAT_ID[cat_name],
-                    'bbox':        [x1, y1, bw, bh],
-                    'area':        bw * bh,
+                    'category_id': _CAT_ID[category_name],
+                    'bbox':        [x1, y1, box_w, box_h],
+                    'area':        box_w * box_h,
                     'iscrowd':     0,
                     'score':       det['conf'],
-                })
-                ann_id += 1
+                }
+                if det.get('track_id') is not None:
+                    ann['track_id'] = det['track_id']
+                if 'valid' in det:
+                    ann['valid'] = det['valid']
+                annotations.append(ann)
+                annotation_id += 1
 
     result = {
         'images':      images,
@@ -115,15 +145,12 @@ def save_coco(width, height, players, rackets, balls, path, fps=None, court_kps=
     }
     if fps is not None:
         result['fps'] = fps
-    if court_kps is not None:
-        result['court'] = {
-            'keypoints':  np.array(court_kps).reshape(14, 2).tolist(),
-            'valid_hull': valid_hull.reshape(-1, 2).tolist() if valid_hull is not None else [],
-        }
+    if court is not None:
+        result['court'] = _serialize_court(court)
 
     with open(path, 'w') as f:
         json.dump(result, f, indent=2)
-    print(f"[    coco] saved → {path}  ({ann_id} annotations, {len(images)} frames)", flush=True)
+    print(f"[    coco] saved → {path}  ({annotation_id} annotations, {len(images)} frames)", flush=True)
 
 
 def load_detections(path):
@@ -132,14 +159,14 @@ def load_detections(path):
 
     返回：fps, width, height,
           court_kps  (ndarray float32, shape (28,)),
-          valid_hull (ndarray int32,   shape (N, 1, 2)),
+          court      (dict，含 keypoints / ground_hull / volume_hull / vol_bottom_pts / vol_top_pts),
           players, rackets, balls  (list[list[dict]])
-          每个 det dict 含 bbox [x1,y1,x2,y2] / conf / track_id
+          每个 det dict 含 bbox [x1,y1,x2,y2] / conf / track_id / valid
     """
     with open(path) as f:
         data = json.load(f)
 
-    cat_name = {c['id']: c['name'] for c in data.get('categories', [])}
+    cat_id_to_name = {c['id']: c['name'] for c in data.get('categories', [])}
     images   = {img['id']: img for img in data.get('images', [])}
     fps      = float(data.get('fps', 25.0))
     first    = next(iter(images.values())) if images else {}
@@ -151,20 +178,25 @@ def load_detections(path):
     rackets    = [[] for _ in range(n_frames)]
     balls      = [[] for _ in range(n_frames)]
     for ann in data.get('annotations', []):
-        fi = ann['image_id']
+        frame_idx = ann['image_id']
         x, y, w, h = ann['bbox']
-        det = {'bbox': [x, y, x + w, y + h], 'conf': ann.get('score', 1.0), 'track_id': None}
-        name = cat_name.get(ann['category_id'], '')
+        det = {
+            'bbox':     [x, y, x + w, y + h],
+            'conf':     ann.get('score', 1.0),
+            'track_id': ann.get('track_id'),
+            'valid':    ann.get('valid', True),
+        }
+        name = cat_id_to_name.get(ann['category_id'], '')
         if name == 'person':
-            players[fi].append(det)
+            players[frame_idx].append(det)
         elif name == 'tennis racket':
-            rackets[fi].append(det)
+            rackets[frame_idx].append(det)
         elif name == 'sports ball':
-            balls[fi].append(det)
+            balls[frame_idx].append(det)
 
-    court      = data.get('court', {})
-    court_kps  = np.array(court.get('keypoints', [[0, 0]] * 14), dtype=np.float32).flatten()
-    valid_hull = np.array(court.get('valid_hull', [[0, 0]]),      dtype=np.int32).reshape(-1, 1, 2)
+    court = _deserialize_court(data.get('court', {}))
 
     print(f"[    json] loaded ← {path}  ({n_frames} frames)", flush=True)
-    return fps, width, height, court_kps, valid_hull, players, rackets, balls
+    return fps, width, height, court, players, rackets, balls
+
+

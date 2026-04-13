@@ -17,8 +17,8 @@ _GAP_SECONDS     = 0.12   # 运动模糊通常 < 0.10 s，留 0.02 s 裕量
 _MIN_DET_SECONDS = 0.08   # 真实球可见段 > 0.1 s；误检通常仅 1~2 帧
 
 # ── _link 内部系数 ───────────────────────────────────────────────────────
-_VEL_ALPHA        = 0.5   # 速度指数滑动平均系数（0=不更新，1=瞬时速度）
-_DYN_RADIUS_SCALE = 1.5   # 动态半径 = 当前速度 × dt × 此系数
+_VELOCITY_EMA_ALPHA   = 0.5   # 速度指数滑动平均系数（0=不更新，1=瞬时速度）
+_DYNAMIC_RADIUS_SCALE = 1.5   # 动态半径 = 当前速度 × dt × 此系数
 
 
 # ── bbox 工具函数 ────────────────────────────────────────────────────────
@@ -148,25 +148,25 @@ class BallTracker:
         active = []   # 活跃轨迹，每条: {frames, vx, vy, gap}
         closed = []
 
-        for i, cands in enumerate(candidates):
+        for frame_idx, candidates_this_frame in enumerate(candidates):
             matched = set()
 
             for track in active:
-                last_fi, last_det = track['frames'][-1]
-                lx, ly = _center(last_det['bbox'])
-                dt = i - last_fi
+                last_frame_idx, last_det = track['frames'][-1]
+                last_x, last_y = _center(last_det['bbox'])
+                dt = frame_idx - last_frame_idx
 
                 # 预测位置（匀速外推）
-                pred_x = lx + track['vx'] * dt
-                pred_y = ly + track['vy'] * dt
+                pred_x = last_x + track['vx'] * dt
+                pred_y = last_y + track['vy'] * dt
 
                 # 动态搜索半径：速度越快或间隔越长，半径越大
                 speed  = (track['vx'] ** 2 + track['vy'] ** 2) ** 0.5
-                radius = max(self.base_radius, speed * dt * _DYN_RADIUS_SCALE)
+                radius = max(self.base_radius, speed * dt * _DYNAMIC_RADIUS_SCALE)
 
                 # 找距预测位置最近的未匹配候选
                 best_j, best_dist = None, radius
-                for j, c in enumerate(cands):
+                for j, c in enumerate(candidates_this_frame):
                     if j in matched:
                         continue
                     cx, cy = _center(c['bbox'])
@@ -175,12 +175,12 @@ class BallTracker:
                         best_dist, best_j = dist, j
 
                 if best_j is not None:
-                    det = cands[best_j]
+                    det = candidates_this_frame[best_j]
                     cx, cy = _center(det['bbox'])
                     # 指数滑动平均更新速度（平衡历史与瞬时）
-                    track['vx'] = _VEL_ALPHA * (cx - lx) / dt + (1 - _VEL_ALPHA) * track['vx']
-                    track['vy'] = _VEL_ALPHA * (cy - ly) / dt + (1 - _VEL_ALPHA) * track['vy']
-                    track['frames'].append((i, det))
+                    track['vx'] = _VELOCITY_EMA_ALPHA * (cx - last_x) / dt + (1 - _VELOCITY_EMA_ALPHA) * track['vx']
+                    track['vy'] = _VELOCITY_EMA_ALPHA * (cy - last_y) / dt + (1 - _VELOCITY_EMA_ALPHA) * track['vy']
+                    track['frames'].append((frame_idx, det))
                     track['gap'] = 0
                     matched.add(best_j)
                 else:
@@ -196,9 +196,9 @@ class BallTracker:
             active = still_active
 
             # 未匹配的候选各自开启新轨迹
-            for j, c in enumerate(cands):
+            for j, c in enumerate(candidates_this_frame):
                 if j not in matched:
-                    active.append({'frames': [(i, c)], 'vx': 0.0, 'vy': 0.0, 'gap': 0})
+                    active.append({'frames': [(frame_idx, c)], 'vx': 0.0, 'vy': 0.0, 'gap': 0})
 
         # 关闭所有剩余活跃轨迹
         closed.extend(track['frames'] for track in active)
@@ -208,21 +208,21 @@ class BallTracker:
         """段内 gap 线性插值，返回含插值帧的 [(frame_idx, det), ...] 列表。"""
         result = []
         for k in range(len(seg) - 1):
-            fi, di = seg[k]
-            fj, dj = seg[k + 1]
-            result.append((fi, di))
-            gap = fj - fi
+            frame_i, det_i = seg[k]
+            frame_j, det_j = seg[k + 1]
+            result.append((frame_i, det_i))
+            gap = frame_j - frame_i
             if gap > 1:
-                cx_i, cy_i = _center(di['bbox'])
-                cx_j, cy_j = _center(dj['bbox'])
+                cx_i, cy_i = _center(det_i['bbox'])
+                cx_j, cy_j = _center(det_j['bbox'])
                 # 插值框的宽高取两端平均
-                w = ((di['bbox'][2] - di['bbox'][0]) + (dj['bbox'][2] - dj['bbox'][0])) / 2
-                h = ((di['bbox'][3] - di['bbox'][1]) + (dj['bbox'][3] - dj['bbox'][1])) / 2
+                w = ((det_i['bbox'][2] - det_i['bbox'][0]) + (det_j['bbox'][2] - det_j['bbox'][0])) / 2
+                h = ((det_i['bbox'][3] - det_i['bbox'][1]) + (det_j['bbox'][3] - det_j['bbox'][1])) / 2
                 for t in range(1, gap):
                     alpha = t / gap
                     cx = cx_i + alpha * (cx_j - cx_i)
                     cy = cy_i + alpha * (cy_j - cy_i)
-                    result.append((fi + t, {
+                    result.append((frame_i + t, {
                         'bbox': [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2],
                         'conf': 0.0,
                         'track_id': None,

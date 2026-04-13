@@ -1,8 +1,9 @@
 """
-第二阶段：读取检测 JSON，逐帧流式处理原始视频，输出注释视频。
+第三阶段：读取 parse.py 输出的处理后 JSON，逐帧流式处理原始视频，输出注释视频。
 
 用法：
-    python render.py -i <video> -j <video>.json
+    python render.py -i <video> -j <video>.json           # detect.py 输出（无过滤/追踪）
+    python render.py -i <video> -j <video>_parsed.json   # parse.py 输出（含过滤/追踪）
     python render.py -i <video> -j <video>.json -o output.mp4
 输出：
     <video>.mp4（默认，输入为 .mp4 时需用 -o 指定不同路径）
@@ -20,10 +21,19 @@ import cv2
 import numpy as np
 
 from utils import video_info, iter_frames, open_video_writer, load_detections, text_params
-from ball_tracker import BallTracker
-from court_detector import (MODEL_KPS_M, COURT_LINES, COURT_W as _COURT_W, NET_Y as _NET_Y,
-                             CourtDetector, CLEARANCE_BACK, CLEARANCE_SIDE)
+from court_detector import (COURT_LINES, COURT_W as _COURT_W, NET_Y as _NET_Y,
+                             compute_H_from_kps)
 
+
+# ── 绘制颜色（BGR）────────────────────────────────────────────────────────────
+_COLOR_COURT      = (80, 200, 255)   # 球场线 / 关键点
+_COLOR_VOLUME     = (0, 220, 255)    # 缓冲区立方体线框
+_COLOR_PLAYER     = (0, 255, 0)      # 有效球员
+_COLOR_RACKET     = (255, 165, 0)    # 有效球拍
+_COLOR_BALL_NONE  = (128, 128, 128)  # 无 track_id 的球
+_COLOR_INV_PLAYER = (0, 60, 0)       # 无效球员
+_COLOR_INV_RACKET = (40, 50, 80)     # 无效球拍
+_COLOR_INV_BALL   = (40, 40, 40)     # 无效网球
 
 # 每条球轨迹按 track_id 循环取色（BGR）
 _TRAJ_COLORS = [
@@ -31,35 +41,15 @@ _TRAJ_COLORS = [
     (0, 255, 100), (255, 200, 0), (0, 100, 255),
 ]
 
+# 帧号字体相对于 scale_large 的放大倍数
+_FRAME_NUM_SCALE = 1.5
+
+# 帧号距边缘的比例（相对于帧高）
+_MARGIN_RATIO = 0.028
+
 
 def _traj_color(track_id):
     return _TRAJ_COLORS[track_id % len(_TRAJ_COLORS)]
-
-
-def _px_per_meter(court_kps):
-    """
-    从 court_kps (ndarray, 14×2 展平) 估算像素/米比例。
-    取远端底线（kps[0]→[1]）和近端底线（kps[2]→[3]）宽度的平均值，
-    消除透视压缩带来的误差。两端真实宽度均为 _COURT_W。
-    """
-    kps      = court_kps.reshape(14, 2)
-    far_ppm  = float(np.linalg.norm(kps[1] - kps[0])) / _COURT_W
-    near_ppm = float(np.linalg.norm(kps[3] - kps[2])) / _COURT_W
-    return (far_ppm + near_ppm) / 2.0
-
-
-def _build_hull_mask(valid_hull, height, width):
-    """预计算凸包掩膜，用于逐帧快速遮黑场外区域。"""
-    mask = np.zeros((height, width), dtype=np.uint8)
-    cv2.fillPoly(mask, [valid_hull], 255)
-    return mask
-
-
-def _compute_H_from_kps(court_kps):
-    """从 14 个关键点反推单应矩阵 H（球场米坐标 → 图像像素）。"""
-    kps_2d = court_kps.reshape(14, 2).astype(np.float32)
-    H, _   = cv2.findHomography(MODEL_KPS_M, kps_2d)
-    return H
 
 
 def _project_line(H, x1, y1, x2, y2):
@@ -71,62 +61,23 @@ def _project_line(H, x1, y1, x2, y2):
 
 def _draw_court_kps(frame, court_kps, H):
     """绘制 14 个球场关键点、球场线条两侧边缘及网线。"""
-    color = (80, 200, 255)   # 淡橙黄，低调但与白色可区分
-
     if H is not None:
-        # 每条球场线绘制两条边缘（内缘 + 外缘）
         for (p1, p2, lw_m) in COURT_LINES:
             half = lw_m / 2
             if p1[1] == p2[1]:   # 水平线 → 沿 y 方向偏移
                 for dy in (-half, +half):
                     pt1, pt2 = _project_line(H, p1[0], p1[1]+dy, p2[0], p2[1]+dy)
-                    cv2.line(frame, pt1, pt2, color, 1)
+                    cv2.line(frame, pt1, pt2, _COLOR_COURT, 1)
             else:                 # 垂直线 → 沿 x 方向偏移
                 for dx in (-half, +half):
                     pt1, pt2 = _project_line(H, p1[0]+dx, p1[1], p2[0]+dx, p2[1])
-                    cv2.line(frame, pt1, pt2, color, 1)
-
-        # 网线
+                    cv2.line(frame, pt1, pt2, _COLOR_COURT, 1)
         pt1, pt2 = _project_line(H, 0, _NET_Y, _COURT_W, _NET_Y)
-        cv2.line(frame, pt1, pt2, color, 1)
+        cv2.line(frame, pt1, pt2, _COLOR_COURT, 1)
 
-    # 关键点小圆
     kps = court_kps.reshape(14, 2).astype(int)
     for pt in kps:
-        cv2.circle(frame, tuple(pt), 4, color, -1)
-
-
-def _in_hull(hull, x, y):
-    return cv2.pointPolygonTest(hull, (float(x), float(y)), False) >= 0
-
-
-def _bbox_overlaps_hull(hull, x1, y1, x2, y2):
-    """bbox 与凸包多边形有重叠则返回 True（检查五个特征点）。"""
-    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-    for pt in [(cx, cy), (x1, y1), (x2, y1), (x1, y2), (x2, y2)]:
-        if _in_hull(hull, *pt):
-            return True
-    return False
-
-
-def _filter_players(players, ground_hull):
-    """保留底部中心落在地面缓冲区内的球员。"""
-    result = []
-    for frame in players:
-        result.append([d for d in frame
-                        if _in_hull(ground_hull,
-                                    (d['bbox'][0] + d['bbox'][2]) / 2,
-                                    d['bbox'][3])])
-    return result
-
-
-def _filter_rackets(rackets, volume_hull):
-    """保留 bbox 与缓冲区立方体凸包有重叠的球拍。"""
-    result = []
-    for frame in rackets:
-        result.append([d for d in frame
-                        if _bbox_overlaps_hull(volume_hull, *d['bbox'])])
-    return result
+        cv2.circle(frame, tuple(pt), 4, _COLOR_COURT, -1)
 
 
 def _build_traj(balls):
@@ -141,31 +92,54 @@ def _build_traj(balls):
     return traj
 
 
-def _draw_frame(frame, fi, court_kps, H, valid_hull, hull_mask,
+def _draw_invalid_bbox(frame, bbox, color):
+    """用暗色调矩形 + 对角线 X 标注无效物体。"""
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1)
+    cv2.line(frame, (x1, y1), (x2, y2), color, 1)
+    cv2.line(frame, (x2, y1), (x1, y2), color, 1)
+
+
+def _draw_volume_wireframe(frame, pts_bot, pts_top, color):
+    """绘制缓冲区立方体线框：底面4条、顶面4条、竖边4条，共12条边。"""
+    pts_b = pts_bot.astype(int)
+    pts_t = pts_top.astype(int)
+    n = len(pts_b)
+    for i in range(n):
+        j = (i + 1) % n
+        cv2.line(frame, tuple(pts_b[i]), tuple(pts_b[j]), color, 1)
+        cv2.line(frame, tuple(pts_t[i]), tuple(pts_t[j]), color, 1)
+        cv2.line(frame, tuple(pts_b[i]), tuple(pts_t[i]), color, 1)
+
+
+def _draw_frame(frame, fi, court_kps, H, pts_vol_bot, pts_vol_top,
                 players, rackets, balls, traj,
+                players_inv, rackets_inv, balls_inv,
                 scale, thick, scale_large, thick_large, margin):
-    """原地修改单帧：遮黑 → 绘制球场轮廓、检测框、球轨迹、帧号。"""
-    # 遮黑场外区域
-    frame[hull_mask == 0] = 0
-
-    # 球场关键点 + 线条（含网线）
+    """原地修改单帧：绘制球场轮廓、缓冲区立方体、检测框、球轨迹、帧号。"""
     _draw_court_kps(frame, court_kps, H)
+    _draw_volume_wireframe(frame, pts_vol_bot, pts_vol_top, _COLOR_VOLUME)
 
-    # 球场凸包轮廓
-    cv2.polylines(frame, [valid_hull], True, (0, 255, 255), 2)
+    # 无效物体（暗色 + X）
+    for det in players_inv[fi]:
+        _draw_invalid_bbox(frame, det['bbox'], _COLOR_INV_PLAYER)
+    for det in rackets_inv[fi]:
+        _draw_invalid_bbox(frame, det['bbox'], _COLOR_INV_RACKET)
+    for det in balls_inv[fi]:
+        _draw_invalid_bbox(frame, det['bbox'], _COLOR_INV_BALL)
 
-    # 球员框
+    # 有效球员
     for det in players[fi]:
         x1, y1, x2, y2 = [int(v) for v in det['bbox']]
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), _COLOR_PLAYER, 2)
         if det.get('track_id') is not None:
             cv2.putText(frame, f"P{det['track_id']}", (x1, y1 - 6),
-                        cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 255, 0), thick)
+                        cv2.FONT_HERSHEY_SIMPLEX, scale, _COLOR_PLAYER, thick)
 
-    # 球拍框
+    # 有效球拍
     for det in rackets[fi]:
         x1, y1, x2, y2 = [int(v) for v in det['bbox']]
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 165, 0), 2)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), _COLOR_RACKET, 2)
 
     # 球轨迹（已出现的点）
     for tid, pts in traj.items():
@@ -174,26 +148,26 @@ def _draw_frame(frame, fi, court_kps, H, valid_hull, hull_mask,
         for k in range(len(visible) - 1):
             cv2.arrowedLine(frame, visible[k], visible[k + 1], color, 2, tipLength=0.4)
 
-    # 当前帧球框
+    # 有效球框
     for det in balls[fi]:
         x1, y1, x2, y2 = [int(v) for v in det['bbox']]
         tid   = det.get('track_id')
-        color = _traj_color(tid) if tid is not None else (128, 128, 128)
+        color = _traj_color(tid) if tid is not None else _COLOR_BALL_NONE
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, thick)
 
     # 帧号
-    fh = frame.shape[0]
-    cv2.putText(frame, str(fi), (margin, fh - margin),
-                cv2.FONT_HERSHEY_SIMPLEX, scale_large * 1.5, (0, 255, 0), thick_large)
+    cv2.putText(frame, str(fi), (margin, frame.shape[0] - margin),
+                cv2.FONT_HERSHEY_SIMPLEX, scale_large * _FRAME_NUM_SCALE,
+                _COLOR_PLAYER, thick_large)
 
 
 def parse_args():
     p = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument('-i', '--input',  required=True, help='原始输入视频路径')
-    p.add_argument('-j', '--json',   required=True, help='detect.py 输出的检测 JSON 路径')
-    p.add_argument('-o', '--output', default=None,  help='输出视频路径（默认：输入视频同名 .mp4）')
+    p.add_argument('-i', '--input',      required=True,               help='原始输入视频路径')
+    p.add_argument('-j', '--json',       required=True,               help='detect.py 或 parse.py 输出的 JSON 路径')
+    p.add_argument('-o', '--output',     default=None,                help='输出视频路径（默认：输入视频同名 .mp4）')
     if len(sys.argv) == 1:
         p.print_help()
         sys.exit(0)
@@ -208,57 +182,54 @@ def main():
         sys.exit(1)
 
     print("─" * 60)
-    print(f"  input   {args.input}")
-    print(f"  json    {args.json}")
-    print(f"  output  {output_path}")
+    print(f"  input       {args.input}")
+    print(f"  json        {args.json}")
+    print(f"  output      {output_path}")
     print("─" * 60, flush=True)
 
-    # ── 预加载：JSON（小）＋ 球跟踪 ────────────────────────────────────────────
-    fps, width, height, court_kps, valid_hull, players, rackets, balls = \
+    # ── 预加载：JSON（小）─────────────────────────────────────────────────────
+    fps, width, height, court, players_raw, rackets_raw, balls_raw = \
         load_detections(args.json)
 
-    balls     = BallTracker.from_video(fps, _px_per_meter(court_kps)).run(balls)
-    H         = _compute_H_from_kps(court_kps)
-    hull_mask = _build_hull_mask(valid_hull, height, width)
+    court_kps   = court['keypoints']
+    pts_vol_bot = court['vol_bottom_pts']
+    pts_vol_top = court['vol_top_pts']
+    H           = compute_H_from_kps(court_kps)
 
-    # ── 缓冲区过滤：球员（地面范围）+ 球拍（2m 立方体范围）──────────────────
-    court_det   = CourtDetector.from_H(H)
-    ground_hull = court_det.get_clearance_hull()
-    vol_hull, _, _ = court_det.get_clearance_volume_hull(
-        (height, width), back=CLEARANCE_BACK, side=CLEARANCE_SIDE, height=2.0)
-    n_players_before = sum(len(f) for f in players)
-    n_rackets_before = sum(len(f) for f in rackets)
-    players = _filter_players(players, ground_hull)
-    rackets = _filter_rackets(rackets, vol_hull)
-    print(f"[  filter] players: {n_players_before} → {sum(len(f) for f in players)}")
-    print(f"[  filter] rackets: {n_rackets_before} → {sum(len(f) for f in rackets)}")
+    players     = [[d for d in f if     d['valid']] for f in players_raw]
+    players_inv = [[d for d in f if not d['valid']] for f in players_raw]
+    rackets     = [[d for d in f if     d['valid']] for f in rackets_raw]
+    rackets_inv = [[d for d in f if not d['valid']] for f in rackets_raw]
+    balls       = [[d for d in f if     d['valid']] for f in balls_raw]
+    balls_inv   = [[d for d in f if not d['valid']] for f in balls_raw]
 
-    traj      = _build_traj(balls)
+    traj = _build_traj(balls)
 
     scale, thick             = text_params(height)
     scale_large, thick_large = text_params(height, base_height=1080)
-    margin = int(height * 0.028)
+    margin = int(height * _MARGIN_RATIO)
 
     # ── 单遍流式处理：读帧 → 处理 → 写帧 ─────────────────────────────────────
     _, _, _, n_frames = video_info(args.input)
-    nw = len(str(n_frames)) if n_frames else 6
+    frame_num_width = len(str(n_frames)) if n_frames else 6
     t0 = time.time()
     count = 0
 
     with open_video_writer(output_path, fps, width, height) as pipe:
         for fi, frame in enumerate(iter_frames(args.input)):
-            _draw_frame(frame, fi, court_kps, H, valid_hull, hull_mask,
+            _draw_frame(frame, fi, court_kps, H, pts_vol_bot, pts_vol_top,
                         players, rackets, balls, traj,
+                        players_inv, rackets_inv, balls_inv,
                         scale, thick, scale_large, thick_large, margin)
             pipe.write(frame.tobytes())
             count = fi + 1
             if n_frames:
                 pct = count * 100 // n_frames
-                print(f"[  render] {count:>{nw}}/{n_frames} frames  ({pct:>3}%)", end='\r', flush=True)
+                print(f"[  render] {count:>{frame_num_width}}/{n_frames} frames  ({pct:>3}%)", end='\r', flush=True)
             else:
                 print(f"[  render] {count} frames", end='\r', flush=True)
 
-    print(f"[  render] {count:>{nw}}/{count} frames  (100%)  done: {time.time()-t0:>6.1f}s")
+    print(f"[  render] {count:>{frame_num_width}}/{count} frames  (100%)  done: {time.time()-t0:>6.1f}s")
     print(f"[  render] saved → {output_path}", flush=True)
 
 

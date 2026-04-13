@@ -49,19 +49,19 @@ CLEARANCE_SIDE = 3.66  # 侧线外侧缓冲（米）
 
 # ── 球场线段定义：(端点1, 端点2, 线宽_m) ─────────────────────
 # 注：坐标为线条中心线坐标（各线已向场内偏移半个线宽，使外缘对齐尺寸）
-_BH = BASELINE_W / 2   # 底线半宽
-_LH = LINE_W / 2       # 普通线半宽
+_BASELINE_HALF_W = BASELINE_W / 2   # 底线半宽
+_LINE_HALF_W     = LINE_W / 2       # 普通线半宽
 
 COURT_LINES = [
     # 底线（外缘在 y=0 / y=COURT_L，中心线向场内偏移半宽）
-    ([0,       _BH],          [COURT_W, _BH],          BASELINE_W),  # 远底线
-    ([0,       COURT_L-_BH],  [COURT_W, COURT_L-_BH],  BASELINE_W),  # 近底线
+    ([0,       _BASELINE_HALF_W],          [COURT_W, _BASELINE_HALF_W],          BASELINE_W),  # 远底线
+    ([0,       COURT_L-_BASELINE_HALF_W],  [COURT_W, COURT_L-_BASELINE_HALF_W],  BASELINE_W),  # 近底线
     # 双打侧线（外缘在 x=0 / x=COURT_W）
-    ([_LH,     0],            [_LH,     COURT_L],       LINE_W),      # 左双打线
-    ([COURT_W-_LH, 0],        [COURT_W-_LH, COURT_L],  LINE_W),      # 右双打线
+    ([_LINE_HALF_W,     0],            [_LINE_HALF_W,     COURT_L],       LINE_W),      # 左双打线
+    ([COURT_W-_LINE_HALF_W, 0],        [COURT_W-_LINE_HALF_W, COURT_L],  LINE_W),      # 右双打线
     # 单打侧线
-    ([SINGLE_OFF+_LH, 0],     [SINGLE_OFF+_LH, COURT_L],       LINE_W),
-    ([COURT_W-SINGLE_OFF-_LH, 0],[COURT_W-SINGLE_OFF-_LH, COURT_L], LINE_W),
+    ([SINGLE_OFF+_LINE_HALF_W, 0],     [SINGLE_OFF+_LINE_HALF_W, COURT_L],       LINE_W),
+    ([COURT_W-SINGLE_OFF-_LINE_HALF_W, 0],[COURT_W-SINGLE_OFF-_LINE_HALF_W, COURT_L], LINE_W),
     # 发球线
     ([SINGLE_OFF, SVC_Y_FAR],  [COURT_W-SINGLE_OFF, SVC_Y_FAR],  LINE_W),
     ([SINGLE_OFF, SVC_Y_NEAR], [COURT_W-SINGLE_OFF, SVC_Y_NEAR], LINE_W),
@@ -71,6 +71,13 @@ COURT_LINES = [
     ([CTR_X, BASELINE_W],             [CTR_X, BASELINE_W+CENTER_MARK_L],    CENTER_MARK_W),
     ([CTR_X, COURT_L-BASELINE_W-CENTER_MARK_L], [CTR_X, COURT_L-BASELINE_W], CENTER_MARK_W),
 ]
+
+
+def compute_H_from_kps(court_kps):
+    """从 14 个关键点计算单应矩阵 H（球场米坐标 → 图像像素）。"""
+    kps_2d = np.array(court_kps).reshape(14, 2).astype(np.float32)
+    H, _   = cv2.findHomography(MODEL_KPS_M, kps_2d)
+    return H
 
 
 class CourtDetector:
@@ -578,17 +585,17 @@ class CourtDetector:
         hull         = cv2.convexHull(all_pts.reshape(-1, 1, 2))
         return hull.astype(np.int32), pts2d_bottom, pts2d_top
 
-    def get_clearance_hull(self):
+    def get_clearance_hull(self, back=CLEARANCE_BACK, side=CLEARANCE_SIDE):
         """
-        将 ITF 标准缓冲区矩形（底线后 CLEARANCE_BACK 米、侧线外 CLEARANCE_SIDE 米）
-        通过单应矩阵 H 投影到图像，返回四边形顶点 (4,1,2) int32。
-        必须在 predict() 之后调用。
+        将缓冲区矩形通过单应矩阵 H 投影到图像，返回四边形顶点 (4,1,2) int32。
+        back : 底线后方缓冲（米），默认 ITF 标准
+        side : 侧线外侧缓冲（米），默认 ITF 标准
         """
         pts_m = np.array([
-            [-CLEARANCE_SIDE,          -CLEARANCE_BACK          ],
-            [COURT_W + CLEARANCE_SIDE, -CLEARANCE_BACK          ],
-            [COURT_W + CLEARANCE_SIDE,  COURT_L + CLEARANCE_BACK],
-            [-CLEARANCE_SIDE,           COURT_L + CLEARANCE_BACK],
+            [-side,          -back          ],
+            [COURT_W + side, -back          ],
+            [COURT_W + side,  COURT_L + back],
+            [-side,           COURT_L + back],
         ], dtype=np.float32)
         pts_px = cv2.perspectiveTransform(pts_m.reshape(-1, 1, 2), self._last_H)
         return pts_px.reshape(-1, 1, 2).astype(np.int32)

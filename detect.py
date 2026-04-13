@@ -15,8 +15,14 @@ import sys
 import cv2
 
 from utils import video_info, iter_frames, save_coco
-from court_detector import CourtDetector
+from court_detector import (CourtDetector, compute_H_from_kps,
+                             CLEARANCE_BACK, CLEARANCE_SIDE)
 from objects_detector import ObjectsDetector
+
+# 缓冲区尺寸：取 ITF 标准的一半（适配俱乐部球场）
+_FILTER_BACK   = CLEARANCE_BACK / 2   # 底线后方 3.20 m
+_FILTER_SIDE   = CLEARANCE_SIDE / 2   # 侧线外侧 1.83 m
+_FILTER_HEIGHT = 2.0                  # 球员最大站立高度（米）
 
 
 def parse_args():
@@ -56,18 +62,33 @@ def main():
     _, first_frame = cap.read()
     cap.release()
 
-    court = CourtDetector(seg_model=args.court_model)
-    kps   = court.predict(first_frame)
+    court_detector = CourtDetector(seg_model=args.court_model)
+    kps            = court_detector.predict(first_frame)
+
+    # 计算缓冲区凸包，写入 JSON，供后续模块直接使用（无需重新依赖常量）
+    H = compute_H_from_kps(kps)
+    court_det      = CourtDetector.from_H(H)
+    ground_hull    = court_det.get_clearance_hull(back=_FILTER_BACK, side=_FILTER_SIDE)
+    volume_hull, vol_bottom_pts, vol_top_pts = court_det.get_clearance_volume_hull(
+        (height, width), back=_FILTER_BACK, side=_FILTER_SIDE, height=_FILTER_HEIGHT)
+
+    court = {
+        'keypoints':     kps,
+        'ground_hull':   ground_hull,
+        'volume_hull':   volume_hull,
+        'vol_bottom_pts': vol_bottom_pts,
+        'vol_top_pts':   vol_top_pts,
+    }
 
     # ── 物体检测（全部帧，全图推理）──────────────────────────────────────────
-    objects = ObjectsDetector(args.object_model, conf=args.conf, imgsz=args.imgsz, device=args.device)
-    players, rackets, balls = objects.run(
+    obj_detector = ObjectsDetector(args.object_model, conf=args.conf, imgsz=args.imgsz, device=args.device)
+    players, rackets, balls = obj_detector.run(
         iter_frames(args.input),
         total=n_frames,
     )
 
     save_coco(width, height, players, rackets, balls, output_path,
-              fps=fps, court_kps=kps)
+              fps=fps, court=court)
 
 
 if __name__ == '__main__':

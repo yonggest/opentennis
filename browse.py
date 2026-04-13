@@ -14,6 +14,9 @@ import sys
 from pathlib import Path
 
 import cv2
+import numpy as np
+from court_detector import (compute_H_from_kps, COURT_LINES,
+                             COURT_W as _COURT_W, NET_Y as _NET_Y)
 from PySide6.QtCore import Qt, QPointF, QRectF, QTimer
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QPolygonF,
@@ -33,8 +36,16 @@ _PALETTE = [
     ("#aa44ff", "#4a1e6e"),
     ("#33cccc", "#1e5c5c"),
 ]
-_COURT_COLOR = "#f0c040"
+_COURT_COLOR  = "#f0c040"
+_VOLUME_COLOR = "#00dcff"
 _LIST_W      = 80    # 左侧帧号列表宽度（像素）
+
+
+def _project_line(H, x1, y1, x2, y2):
+    """用 H 将球场米坐标线段投影为图像像素坐标，返回 (pt1, pt2)。"""
+    pts = cv2.perspectiveTransform(
+        np.array([[[x1, y1]], [[x2, y2]]], dtype=np.float32), H)
+    return tuple(pts[0, 0].astype(int)), tuple(pts[1, 0].astype(int))
 
 
 # ── JSON 加载 ─────────────────────────────────────────────────────────────────
@@ -44,7 +55,7 @@ def load_annotations(json_path: Path) -> tuple[dict, dict, dict | None]:
     读取 COCO 格式 JSON，返回 (frame_anns, categories, court)
       frame_anns : {frame_idx: [{"bbox":[x,y,w,h], "category_id":int, "score":float}, ...]}
       categories : {cat_id: name}
-      court      : {"keypoints":[[x,y],...], "valid_hull":[[x,y],...]} 或 None
+      court      : {"keypoints":[[x,y],...], "ground_hull":[[x,y],...], ...} 或 None
     image.id 直接作为帧号。
     """
     with open(json_path) as f:
@@ -58,6 +69,8 @@ def load_annotations(json_path: Path) -> tuple[dict, dict, dict | None]:
             "bbox":        ann["bbox"],
             "category_id": ann["category_id"],
             "score":       ann.get("score", 1.0),
+            "track_id":    ann.get("track_id"),
+            "valid":       ann.get("valid", True),
         })
 
     court = data.get("court")
@@ -66,7 +79,7 @@ def load_annotations(json_path: Path) -> tuple[dict, dict, dict | None]:
 
 # ── View（缩放/平移） ─────────────────────────────────────────────────────────
 
-class View(QGraphicsView):
+class FrameView(QGraphicsView):
     def __init__(self, scene):
         super().__init__(scene)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
@@ -91,11 +104,15 @@ class BrowseApp(QMainWindow):
         self.court       = court
 
         cat_ids = sorted(categories.keys())
-        self.cat_colors: dict[int, QColor] = {
+        self.category_colors: dict[int, QColor] = {
             cid: QColor(_PALETTE[i % len(_PALETTE)][0])
             for i, cid in enumerate(cat_ids)
         }
-        self.cat_labels: dict[int, str] = {
+        self.category_dark_colors: dict[int, QColor] = {
+            cid: QColor(_PALETTE[i % len(_PALETTE)][1])
+            for i, cid in enumerate(cat_ids)
+        }
+        self.category_labels: dict[int, str] = {
             cid: (words[-1][0].upper() if (words := categories[cid].split()) else "?")
             for cid in cat_ids
         }
@@ -134,7 +151,7 @@ class BrowseApp(QMainWindow):
         tl.setContentsMargins(12, 6, 12, 6); tl.setSpacing(6)
         tl.addWidget(QLabel("显示:", styleSheet="color:#858585; font:11pt Menlo;"))
 
-        self.vis_btns: dict[int, QPushButton] = {}
+        self.vis_buttons: dict[int, QPushButton] = {}
         for i, (cid, cname) in enumerate(sorted(self.categories.items())):
             active = _PALETTE[i % len(_PALETTE)][0]
             dark   = _PALETTE[i % len(_PALETTE)][1]
@@ -147,9 +164,9 @@ class BrowseApp(QMainWindow):
                                       border:1px solid {active}; }}
                 QPushButton:hover   {{ background:{dark};  color:white; }}
             """)
-            btn.clicked.connect(lambda _, c=cid: self._toggle_vis(c))
+            btn.clicked.connect(lambda _, c=cid: self._toggle_category(c))
             tl.addWidget(btn)
-            self.vis_btns[cid] = btn
+            self.vis_buttons[cid] = btn
 
         if self.court:
             self.court_btn = QPushButton("  球场  ")
@@ -169,11 +186,11 @@ class BrowseApp(QMainWindow):
         tl.addWidget(self.status_lbl)
 
         # 左侧帧号列表
-        self.thumb_list = QListWidget()
-        self.thumb_list.setFixedWidth(_LIST_W)
-        self.thumb_list.setUniformItemSizes(True)
-        self.thumb_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.thumb_list.setStyleSheet("""
+        self.frame_list = QListWidget()
+        self.frame_list.setFixedWidth(_LIST_W)
+        self.frame_list.setUniformItemSizes(True)
+        self.frame_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.frame_list.setStyleSheet("""
             QListWidget { background:#141414; border:none; outline:none; }
             QListWidget::item { color:#555; font:9pt Menlo; text-align:right;
                                 border-bottom:1px solid #1c1c1c; padding:2px 6px; }
@@ -182,12 +199,12 @@ class BrowseApp(QMainWindow):
         for i in range(self.total_frames):
             item = QListWidgetItem(str(i))
             item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.thumb_list.addItem(item)
-        self.thumb_list.currentRowChanged.connect(self._on_list_select)
+            self.frame_list.addItem(item)
+        self.frame_list.currentRowChanged.connect(self._on_list_select)
 
         # Scene / View
         self.scene = QGraphicsScene()
-        self.view  = View(self.scene)
+        self.view  = FrameView(self.scene)
         self.view.setRenderHint(QPainter.Antialiasing)
         self.view.setBackgroundBrush(QBrush(QColor("#111111")))
         self.view.setDragMode(QGraphicsView.NoDrag)
@@ -245,9 +262,9 @@ class BrowseApp(QMainWindow):
         rl.addWidget(ctrl)
         rl.addWidget(hint)
 
-        # 分割器：左=缩略图列表，右=主视图
+        # 分割器：左=帧号列表，右=主视图
         splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(self.thumb_list)
+        splitter.addWidget(self.frame_list)
         splitter.addWidget(right)
         splitter.setSizes([_LIST_W, 1280])
         splitter.setHandleWidth(2)
@@ -287,11 +304,11 @@ class BrowseApp(QMainWindow):
         self._update_status()
 
         # 同步帧号列表（blockSignals 防止回调 _on_list_select 形成循环）
-        self.thumb_list.blockSignals(True)
-        self.thumb_list.setCurrentRow(self.current_frame)
-        self.thumb_list.blockSignals(False)
-        self.thumb_list.scrollToItem(
-            self.thumb_list.item(self.current_frame),
+        self.frame_list.blockSignals(True)
+        self.frame_list.setCurrentRow(self.current_frame)
+        self.frame_list.blockSignals(False)
+        self.frame_list.scrollToItem(
+            self.frame_list.item(self.current_frame),
             QAbstractItemView.PositionAtCenter,
         )
 
@@ -343,16 +360,23 @@ class BrowseApp(QMainWindow):
             reverse=True,
         )
         for z, ann in enumerate(anns_sorted):
-            cid = ann["category_id"]
+            cid   = ann["category_id"]
             x, y, w, h = ann["bbox"]
-            color = self.cat_colors.get(cid, QColor("white"))
+            valid = ann.get("valid", True)
+            color = (self.category_colors if valid else self.category_dark_colors).get(
+                cid, QColor("white"))
 
-            pen = QPen(color, 2)
+            pen = QPen(color, 1 if not valid else 2)
             pen.setCosmetic(True)
             box = self.scene.addRect(QRectF(x, y, w, h), pen, QBrush(Qt.NoBrush))
             box.setZValue(z + 1)
 
-            label = self.cat_labels.get(cid, "?")
+            if not valid:
+                self.scene.addLine(x, y, x + w, y + h, pen).setZValue(z + 1)
+                self.scene.addLine(x + w, y, x, y + h, pen).setZValue(z + 1)
+                continue
+
+            label = self.category_labels.get(cid, "?")
             score = ann.get("score")
             if score is not None and score != 1.0:
                 label = f"{label} {score:.2f}"
@@ -366,24 +390,44 @@ class BrowseApp(QMainWindow):
             self._render_court(font_size)
 
     def _render_court(self, font_size: int):
-        court_color = QColor(_COURT_COLOR)
-        pen = QPen(court_color, 2)
-        pen.setCosmetic(True)
+        court_pen  = QPen(QColor(_COURT_COLOR),  1); court_pen.setCosmetic(True)
+        volume_pen = QPen(QColor(_VOLUME_COLOR), 1); volume_pen.setCosmetic(True)
 
-        hull = self.court.get("valid_hull", [])
-        if len(hull) >= 2:
-            poly = QPolygonF([QPointF(p[0], p[1]) for p in hull])
-            self.scene.addPolygon(poly, pen, QBrush(Qt.NoBrush)).setZValue(0)
+        # 球场线条 + 网线 + 关键点
+        keypoints = self.court.get("keypoints", [])
+        if keypoints:
+            H = compute_H_from_kps(np.array(keypoints, dtype=np.float32).flatten())
+            for (p1, p2, _lw) in COURT_LINES:
+                pt1, pt2 = _project_line(H, p1[0], p1[1], p2[0], p2[1])
+                self.scene.addLine(pt1[0], pt1[1], pt2[0], pt2[1], court_pen).setZValue(0)
+            pt1, pt2 = _project_line(H, 0, _NET_Y, _COURT_W, _NET_Y)
+            self.scene.addLine(pt1[0], pt1[1], pt2[0], pt2[1], court_pen).setZValue(0)
 
-        kp_radius = max(6, font_size * 0.4)
-        for kp in self.court.get("keypoints", []):
-            x, y = kp
-            self.scene.addEllipse(
-                x - kp_radius, y - kp_radius, kp_radius * 2, kp_radius * 2,
-                pen, QBrush(court_color),
-            ).setZValue(0)
+            kp_radius = max(6, font_size * 0.4)
+            for kp in keypoints:
+                x, y = kp
+                self.scene.addEllipse(
+                    x - kp_radius, y - kp_radius, kp_radius * 2, kp_radius * 2,
+                    court_pen, QBrush(QColor(_COURT_COLOR)),
+                ).setZValue(0)
 
-    def _toggle_vis(self, cat_id: int):
+        # 地面缓冲区轮廓
+        ground_hull = self.court.get("ground_hull", [])
+        if len(ground_hull) >= 2:
+            poly = QPolygonF([QPointF(p[0], p[1]) for p in ground_hull])
+            self.scene.addPolygon(poly, court_pen, QBrush(Qt.NoBrush)).setZValue(0)
+
+        # 缓冲区立方体线框
+        vol_bot = self.court.get("vol_bottom_pts", [])
+        vol_top = self.court.get("vol_top_pts", [])
+        if len(vol_bot) == 4 and len(vol_top) == 4:
+            for i in range(4):
+                j = (i + 1) % 4
+                self.scene.addLine(vol_bot[i][0], vol_bot[i][1], vol_bot[j][0], vol_bot[j][1], volume_pen).setZValue(0)
+                self.scene.addLine(vol_top[i][0], vol_top[i][1], vol_top[j][0], vol_top[j][1], volume_pen).setZValue(0)
+                self.scene.addLine(vol_bot[i][0], vol_bot[i][1], vol_top[i][0], vol_top[i][1], volume_pen).setZValue(0)
+
+    def _toggle_category(self, cat_id: int):
         if cat_id in self.visible_cats:
             self.visible_cats.discard(cat_id)
         else:
