@@ -5,7 +5,7 @@
     python render.py -i <video> -j <video>.json
     python render.py -i <video> -j <video>.json -o output.mp4
 输出：
-    <video>_out.mp4（默认）或 -o 指定的路径
+    <video>.mp4（默认，输入为 .mp4 时需用 -o 指定不同路径）
 
 内存占用：恒定（单帧 + JSON）——适合超大视频文件（>10 GB）。
 """
@@ -159,7 +159,7 @@ def parse_args():
     )
     p.add_argument('-i', '--input',  required=True, help='原始输入视频路径')
     p.add_argument('-j', '--json',   required=True, help='detect.py 输出的检测 JSON 路径')
-    p.add_argument('-o', '--output', default=None,  help='输出视频路径（默认：输入视频同名加 _out.mp4）')
+    p.add_argument('-o', '--output', default=None,  help='输出视频路径（默认：输入视频同名 .mp4）')
     if len(sys.argv) == 1:
         p.print_help()
         sys.exit(0)
@@ -168,7 +168,10 @@ def parse_args():
 
 def main():
     args = parse_args()
-    output_path = args.output or os.path.splitext(args.input)[0] + '_out.mp4'
+    output_path = args.output or os.path.splitext(args.input)[0] + '.mp4'
+    if os.path.abspath(output_path) == os.path.abspath(args.input):
+        print(f"错误: 输出路径与输入路径相同: {output_path}", file=sys.stderr)
+        sys.exit(1)
 
     print("─" * 60)
     print(f"  input   {args.input}")
