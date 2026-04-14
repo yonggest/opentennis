@@ -46,6 +46,7 @@ def main():
     print(f"  patience       20")
     print(f"  save_period    5")
     print(f"  pretrained     True")
+    print(f"  plots          False")
     print(f"  cache          False")
     print(f"  augmentation   hsv_h/s/v=0  degrees=0  translate=0  scale=0")
     print(f"                 fliplr=0  mosaic=0  mixup=0  copy_paste=0")
@@ -79,6 +80,7 @@ def main():
         name=run_name,
         exist_ok=False,
         pretrained=True,
+        plots=False,
         optimizer="AdamW",
         # 数据增强（微调时适度降低）
         hsv_h=0.0,
