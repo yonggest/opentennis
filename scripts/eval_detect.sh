@@ -15,7 +15,7 @@ fi
 DATA="$1"
 MODEL="$2"
 IMGSZ=1920
-CONF=0.25
+CONF=0.5
 
 cd "$(dirname "$0")/.."
 
