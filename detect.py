@@ -90,6 +90,17 @@ def main():
     save_coco(width, height, players, rackets, balls, output_path,
               fps=fps, court=court)
 
+    n_players = sum(len(v) for v in players)
+    n_rackets = sum(len(v) for v in rackets)
+    n_balls   = sum(len(v) for v in balls)
+    print("\n── 检测结果摘要 " + "─" * 44)
+    print(f"  帧数          {n_frames}")
+    print(f"  person        {n_players}  ({n_players/n_frames:.1f}/帧)")
+    print(f"  tennis racket {n_rackets}  ({n_rackets/n_frames:.1f}/帧)")
+    print(f"  sports ball   {n_balls}  ({n_balls/n_frames:.1f}/帧)")
+    print(f"  输出          {output_path}")
+    print("─" * 60)
+
 
 if __name__ == '__main__':
     main()
