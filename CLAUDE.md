@@ -36,10 +36,10 @@ python3.10 -m venv .venv
 
 ```bash
 # Fine-tune
-.venv/bin/python train_yolo.py --data datasets/xxx-yolo/data.yaml --name finetune
+.venv/bin/python train_detect.py --data datasets/xxx-yolo/data.yaml --name finetune
 
 # Evaluate
-.venv/bin/python eval_yolo.py --data datasets/xxx-yolo/data.yaml
+.venv/bin/python eval_detect.py --data datasets/xxx-yolo/data.yaml
 ```
 
 - Training outputs to `runs/{task}/exp/<name>/` under the project root (absolute path, not affected by ultralytics global `runs_dir` setting)
@@ -90,6 +90,6 @@ render.py
 | `objects_detector.py` | ObjectsDetector: single predict() call for person/racket/ball |
 | `ball_tracker.py` | BallTracker: physics-based trajectory linking across frames |
 | `utils.py` | Video I/O, `save_coco` / `load_detections`, `text_params` |
-| `train_yolo.py` | Fine-tune YOLO on tennis dataset |
-| `eval_yolo.py` | Evaluate model with per-class AP metrics |
+| `train_detect.py` | Fine-tune YOLO on tennis dataset |
+| `eval_detect.py` | Evaluate model with per-class AP metrics |
 | `debug_court.py` | Save intermediate court detection images for debugging |

@@ -1,9 +1,9 @@
 """
-用 YOLO 数据集训练模型。
+训练目标检测模型（球员 / 球拍 / 网球）。
 
 用法:
-    python train_yolo.py --data datasets/xxx-yolo/data.yaml
-    python train_yolo.py --data datasets/xxx-yolo/data.yaml --name finetune --epochs 50 --batch 4 --device 0
+    python train_detect.py --data <data.yaml>
+    python train_detect.py --data <data.yaml> --name finetune --epochs 50 --batch 4 --device 0
 """
 
 import argparse

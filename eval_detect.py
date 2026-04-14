@@ -5,8 +5,8 @@
 无需关心不同模型的 class index 差异。
 
 用法:
-  python eval_yolo.py --data <data.yaml>                   # 评测原始 COCO 模型
-  python eval_yolo.py --data <data.yaml> --model best.pt   # 评测微调后模型
+  python eval_detect.py --data <data.yaml>                   # 评测原始 COCO 模型
+  python eval_detect.py --data <data.yaml> --model best.pt   # 评测微调后模型
 """
 
 import argparse
