@@ -100,6 +100,53 @@ def _draw_invalid_bbox(frame, bbox, color):
     cv2.line(frame, (x2, y1), (x1, y2), color, 1)
 
 
+def _draw_outside_masks(frame, pts_bot, pts_top, alpha=0.4):
+    """在缓冲区侧边外部绘制半透明遮罩，侧边沿墙竖边方向延伸到天空。"""
+    h, w = frame.shape[:2]
+    sky_y   = -h
+    floor_y =  h * 2
+
+    fl_b, fr_b, nr_b, nl_b = pts_bot
+    fl_t, fr_t, nr_t, nl_t = pts_top
+
+    def wall_to_sky(p_b, p_t):
+        dy = float(p_t[1]) - float(p_b[1])
+        if abs(dy) < 1e-6:
+            return float(p_t[0])
+        return float(p_t[0]) + (sky_y - float(p_t[1])) / dy * (float(p_t[0]) - float(p_b[0]))
+
+    def x_at_y(p1, p2, y):
+        dy = float(p2[1]) - float(p1[1])
+        if abs(dy) < 1e-6:
+            return float(p1[0])
+        return float(p1[0]) + (float(p2[0]) - float(p1[0])) / dy * (y - float(p1[1]))
+
+    left_pts = np.array([
+        [-w,                       sky_y  ],
+        [wall_to_sky(fl_b, fl_t),  sky_y  ],
+        [fl_t[0],                  fl_t[1]],
+        [fl_b[0],                  fl_b[1]],
+        [nl_b[0],                  nl_b[1]],
+        [x_at_y(fl_b, nl_b, floor_y), floor_y],
+        [-w,                       floor_y],
+    ], dtype=np.int32)
+
+    right_pts = np.array([
+        [w * 2,                    sky_y  ],
+        [wall_to_sky(fr_b, fr_t),  sky_y  ],
+        [fr_t[0],                  fr_t[1]],
+        [fr_b[0],                  fr_b[1]],
+        [nr_b[0],                  nr_b[1]],
+        [x_at_y(fr_b, nr_b, floor_y), floor_y],
+        [w * 2,                    floor_y],
+    ], dtype=np.int32)
+
+    overlay = frame.copy()
+    cv2.fillPoly(overlay, [left_pts],  (0, 0, 0))
+    cv2.fillPoly(overlay, [right_pts], (0, 0, 0))
+    cv2.addWeighted(overlay, alpha, frame, 1.0 - alpha, 0, frame)
+
+
 def _draw_volume_wireframe(frame, pts_bot, pts_top, color):
     """绘制缓冲区立方体线框：底面4条、顶面4条、竖边4条，共12条边。"""
     pts_b = pts_bot.astype(int)
@@ -118,6 +165,7 @@ def _draw_frame(frame, fi, court_kps, H, pts_vol_bot, pts_vol_top,
                 scale, thick, scale_large, thick_large, margin):
     """原地修改单帧：绘制球场轮廓、缓冲区立方体、检测框、球轨迹、帧号。"""
     _draw_court_kps(frame, court_kps, H)
+    _draw_outside_masks(frame, pts_vol_bot, pts_vol_top)
     _draw_volume_wireframe(frame, pts_vol_bot, pts_vol_top, _COLOR_VOLUME)
 
     # 无效物体（暗色 + X）

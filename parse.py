@@ -71,11 +71,40 @@ def _filter_rackets(rackets, volume_hull):
     return kept, removed
 
 
-def _filter_balls(balls, volume_hull):
+def _make_wall_quads(vol_bottom_pts, vol_top_pts, img_height):
+    """构造左右侧边墙延伸到天空的四边形 (4,1,2) float32。
+    球起点落在墙面四边形内 → 出界。
+    vol_bottom/top 顺序: [远左, 远右, 近右, 近左]
+    """
+    bpts = np.array(vol_bottom_pts, dtype=np.float64)
+    tpts = np.array(vol_top_pts,    dtype=np.float64)
+    fl_b, fr_b, nr_b, nl_b = bpts
+    fl_t, fr_t, nr_t, nl_t = tpts
+    sky_y = float(-img_height)
+
+    def to_sky(p_b, p_t):
+        dy = p_t[1] - p_b[1]
+        if abs(dy) < 1e-6:
+            return p_t.copy()
+        t = (sky_y - p_t[1]) / dy
+        return p_t + t * (p_t - p_b)
+
+    def quad(a, b, c, d):
+        return np.array([a[:2], b[:2], c[:2], d[:2]],
+                        dtype=np.float32).reshape(-1, 1, 2)
+
+    # 左墙四边形：远左底 → 近左底 → 近左天 → 远左天
+    left_q  = quad(fl_b, nl_b, to_sky(nl_b, nl_t), to_sky(fl_b, fl_t))
+    # 右墙四边形：远右底 → 近右底 → 近右天 → 远右天
+    right_q = quad(fr_b, nr_b, to_sky(nr_b, nr_t), to_sky(fr_b, fr_t))
+    return left_q, right_q
+
+
+def _filter_balls(balls, left_wall_q, right_wall_q, volume_hull):
     """
     返回 (kept, removed)。
-    静止球（轨迹平均帧间位移 < _STATIC_BALL_THRESH_PX）必须落在缓冲区内；
-    运动球起点必须在缓冲区内，否则整条轨迹无效。
+    静止球（轨迹平均帧间位移 < _STATIC_BALL_THRESH_PX）必须落在立方体凸包内；
+    运动球起点落在左墙或右墙四边形内（出界）→ 整条轨迹无效。
     无 track_id 的孤立检测视为静止球处理。
     """
     track_pts = defaultdict(list)
@@ -97,7 +126,8 @@ def _filter_balls(balls, volume_hull):
                  for i in range(len(pts)-1)]
         if np.mean(dists) < _STATIC_BALL_THRESH_PX:
             static_tracks.add(tid)
-        elif not _in_hull(volume_hull, pts[0][0], pts[0][1]):
+        elif (_in_hull(left_wall_q,  pts[0][0], pts[0][1]) or
+              _in_hull(right_wall_q, pts[0][0], pts[0][1])):
             invalid_tracks.add(tid)
 
     kept, removed = [], []
@@ -147,13 +177,15 @@ def main():
     # 缓冲区过滤
     ground_hull = court['ground_hull']
     volume_hull = court['volume_hull']
+    left_wall_q, right_wall_q = _make_wall_quads(
+        court['vol_bottom_pts'], court['vol_top_pts'], height)
 
     n_players_before = sum(len(f) for f in players)
     n_rackets_before = sum(len(f) for f in rackets)
     n_balls_before   = sum(len(f) for f in balls)
     players, players_inv = _filter_players(players, ground_hull)
     rackets, rackets_inv = _filter_rackets(rackets, volume_hull)
-    balls,   balls_inv   = _filter_balls(balls, volume_hull)
+    balls,   balls_inv   = _filter_balls(balls, left_wall_q, right_wall_q, volume_hull)
     print(f"[  filter] players: {n_players_before} → {sum(len(f) for f in players)}")
     print(f"[  filter] rackets: {n_rackets_before} → {sum(len(f) for f in rackets)}")
     print(f"[  filter] balls:   {n_balls_before} → {sum(len(f) for f in balls)}")

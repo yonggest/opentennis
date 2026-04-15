@@ -63,7 +63,7 @@ parse.py
 render.py
   → load_detections()                  — reads either JSON
   → split valid/invalid per frame
-  → draw: court lines + volume wireframe → valid boxes → invalid boxes (dark+X) → ball trajectories
+  → draw: court lines + volume wireframe + outside wall masks → valid boxes → invalid boxes (dark+X) → ball trajectories
   → ffmpeg H.264 encoding              → <output>.mp4
 ```
 
@@ -72,7 +72,9 @@ render.py
 - **Unified JSON format:** detect.py and parse.py share the same COCO schema. parse.py extends each annotation with `track_id` (int|null) and `valid` (bool). render.py reads both; `valid` defaults to `true` when absent (detect.py output).
 - **Single inference:** `model.predict()` (not `model.track()`) with `classes=[0, 38, 32]`. `track()` was abandoned because ByteTrack drops unconfirmed detections (box.id=None), causing ball loss.
 - **Court keypoints** detected only on frame 0 — the court doesn't move.
-- **Clearance volume:** ITF standard / 2 — back 3.20 m, side 1.83 m, height 2.0 m. Projected as wireframe in render/browse. Players filtered by ground hull (bottom-center inside), rackets by volume hull (5-point bbox check), balls by trajectory start point and static threshold (avg displacement < 5 px).
+- **Clearance volume:** ITF standard / 2 — back 3.20 m, side 1.83 m, height 2.0 m. Projected as wireframe in render/browse. Players filtered by ground hull (bottom-center inside), rackets by volume hull (5-point bbox check), balls by side-wall quads + static threshold (avg displacement < 5 px).
+- **Side wall filtering (balls):** Moving ball trajectories are invalidated if the start point falls inside the left or right wall quadrilateral — each wall is the volume side face (`vol_bottom_pts` + `vol_top_pts`) extended to sky via the vertical edge direction. Using the wall face quad (not the full volume hull) avoids false negatives for airborne balls, and extending to sky avoids false negatives from the 2 m height cap. Static balls still use volume hull per-frame.
+- **Outside wall masks:** render.py and browse.py draw a semi-transparent dark overlay outside the two side walls. The mask boundary follows the far-left/far-right vertical edge of the volume (bottom → 2 m top → sky), creating a wall-like appearance rather than a flat curtain.
 - **Invalid detections** are kept in the JSON (`valid=false`) and shown in dark color + X in render/browse.
 - **Output encoding:** ffmpeg libx264, crf=18, preset=fast.
 - **Inference device:** auto-selects cuda > mps > cpu.

@@ -417,15 +417,83 @@ class BrowseApp(QMainWindow):
             poly = QPolygonF([QPointF(p[0], p[1]) for p in ground_hull])
             self.scene.addPolygon(poly, court_pen, QBrush(Qt.NoBrush)).setZValue(0)
 
-        # 缓冲区立方体线框
+        # 缓冲区立方体线框 + 侧边外部遮罩
         vol_bot = self.court.get("vol_bottom_pts", [])
         vol_top = self.court.get("vol_top_pts", [])
         if len(vol_bot) == 4 and len(vol_top) == 4:
+            self._render_outside_masks(vol_bot, vol_top)
             for i in range(4):
                 j = (i + 1) % 4
-                self.scene.addLine(vol_bot[i][0], vol_bot[i][1], vol_bot[j][0], vol_bot[j][1], volume_pen).setZValue(0)
-                self.scene.addLine(vol_top[i][0], vol_top[i][1], vol_top[j][0], vol_top[j][1], volume_pen).setZValue(0)
-                self.scene.addLine(vol_bot[i][0], vol_bot[i][1], vol_top[i][0], vol_top[i][1], volume_pen).setZValue(0)
+                self.scene.addLine(vol_bot[i][0], vol_bot[i][1], vol_bot[j][0], vol_bot[j][1], volume_pen).setZValue(1)
+                self.scene.addLine(vol_top[i][0], vol_top[i][1], vol_top[j][0], vol_top[j][1], volume_pen).setZValue(1)
+                self.scene.addLine(vol_bot[i][0], vol_bot[i][1], vol_top[i][0], vol_top[i][1], volume_pen).setZValue(1)
+
+    def _render_outside_masks(self, vol_bot, vol_top):
+        """在缓冲区侧边外部绘制半透明遮罩。
+        侧边沿体积盒竖边方向（fl_bot→fl_top）向天空延伸，像一堵墙。
+        vol_bot/vol_top 点顺序: [0]=远左, [1]=远右, [2]=近右, [3]=近左
+        """
+        def wall_to_sky(p_bot, p_top, sky_y):
+            """沿 p_bot→p_top 方向从 p_top 继续延伸到 sky_y，返回 (x, sky_y)。"""
+            bx, by = float(p_bot[0]), float(p_bot[1])
+            tx, ty = float(p_top[0]), float(p_top[1])
+            dy = ty - by
+            if abs(dy) < 1e-6:
+                return tx, sky_y
+            t = (sky_y - ty) / dy
+            return tx + (tx - bx) * t, sky_y
+
+        def x_at_y(p1, p2, y):
+            x1, y1 = float(p1[0]), float(p1[1])
+            x2, y2 = float(p2[0]), float(p2[1])
+            dy = y2 - y1
+            if abs(dy) < 1e-6:
+                return x1
+            return x1 + (x2 - x1) / dy * (y - y1)
+
+        sky_y   = -self._img_h
+        floor_y =  self._img_h * 2
+
+        # vol_bot/vol_top: [0]=远左, [1]=远右, [2]=近右, [3]=近左
+        nl_bot, fl_bot = vol_bot[3], vol_bot[0]
+        nr_bot, fr_bot = vol_bot[2], vol_bot[1]
+        nl_top, fl_top = vol_top[3], vol_top[0]
+        nr_top, fr_top = vol_top[2], vol_top[1]
+
+        # 沿墙竖边方向延伸到天空
+        fl_sky_x, _ = wall_to_sky(fl_bot, fl_top, sky_y)
+        fr_sky_x, _ = wall_to_sky(fr_bot, fr_top, sky_y)
+
+        # 地面边界向近端延伸至图像底部以下
+        x_floor_l = x_at_y(fl_bot, nl_bot, floor_y)
+        x_floor_r = x_at_y(fr_bot, nr_bot, floor_y)
+
+        mask_brush = QBrush(QColor(0, 0, 0, 70))
+        no_pen = QPen(Qt.NoPen)
+
+        # 左侧遮罩：以远左竖边延伸到天空为界，覆盖其左侧区域
+        left_poly = QPolygonF([
+            QPointF(-self._img_w, sky_y),
+            QPointF(fl_sky_x,     sky_y),
+            QPointF(fl_top[0],    fl_top[1]),
+            QPointF(fl_bot[0],    fl_bot[1]),
+            QPointF(nl_bot[0],    nl_bot[1]),
+            QPointF(x_floor_l,    floor_y),
+            QPointF(-self._img_w, floor_y),
+        ])
+        self.scene.addPolygon(left_poly, no_pen, mask_brush).setZValue(0.5)
+
+        # 右侧遮罩：以远右竖边延伸到天空为界，覆盖其右侧区域
+        right_poly = QPolygonF([
+            QPointF(self._img_w * 2, sky_y),
+            QPointF(fr_sky_x,        sky_y),
+            QPointF(fr_top[0],       fr_top[1]),
+            QPointF(fr_bot[0],       fr_bot[1]),
+            QPointF(nr_bot[0],       nr_bot[1]),
+            QPointF(x_floor_r,       floor_y),
+            QPointF(self._img_w * 2, floor_y),
+        ])
+        self.scene.addPolygon(right_poly, no_pen, mask_brush).setZValue(0.5)
 
     def _toggle_category(self, cat_id: int):
         if cat_id in self.visible_cats:
