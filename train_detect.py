@@ -36,7 +36,7 @@ def main():
     print(f"  data           {args.data}")
     print(f"  device         {args.device or 'auto'}")
     print(f"  epochs         {args.epochs}")
-    print(f"  batch          2")
+    print(f"  batch          1")
     print(f"  imgsz          1920")
     print(f"  lr0            {args.lr0}")
     print(f"  lrf            0.01")
@@ -48,8 +48,9 @@ def main():
     print(f"  pretrained     True")
     print(f"  plots          False")
     print(f"  cache          False")
-    print(f"  augmentation   hsv_h/s/v=0  degrees=0  translate=0  scale=0")
-    print(f"                 fliplr=0  mosaic=0  mixup=0  copy_paste=0")
+    print(f"  augmentation   hsv_h=0  hsv_s=0.1  hsv_v=0.2  degrees=0")
+    print(f"                 translate=0.1  scale=0.25  fliplr=0.25")
+    print(f"                 mosaic=0  mixup=0  copy_paste=0")
     print("─" * 60, flush=True)
 
     if not Path(args.model).exists():
@@ -65,11 +66,11 @@ def main():
     results = model.train(
         data=args.data,
         epochs=args.epochs,
-        batch=2,
+        batch=1,
         lr0=args.lr0,
         imgsz=1920,
         freeze=23,           # 冻结 backbone + neck，只微调 Detect head
-        lrf=0.1,             # 最终学习率 = lr0 * lrf
+        lrf=0.01,            # 最终学习率 = lr0 * lrf
         warmup_epochs=1,     # freeze > 0 只训练 head 时，建议改为 1
         patience=20,         # Early stopping
         save=True,
