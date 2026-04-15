@@ -41,7 +41,7 @@ def main():
     print(f"  lr0            {args.lr0}")
     print(f"  lrf            0.1")
     print(f"  optimizer      AdamW")
-    print(f"  freeze         11")
+    print(f"  freeze         23")
     print(f"  warmup_epochs  1")
     print(f"  patience       20")
     print(f"  save_period    5")
@@ -69,7 +69,7 @@ def main():
         batch=1,
         lr0=args.lr0,
         imgsz=1920,
-        freeze=11,           # 冻结 backbone（0–10），训练 neck + head
+        freeze=23,           # 冻结 backbone + neck（0–22），只训练 Detect head
         lrf=0.1,             # 最终学习率 = lr0 * lrf
         warmup_epochs=1,     # freeze > 0 只训练 head 时，建议改为 1
         patience=20,         # Early stopping

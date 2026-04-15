@@ -187,7 +187,7 @@ cp runs/segment/<run_name>/weights/best.pt models/court_seg.pt
 | `data` | —（必填） | — | 数据集配置文件路径（data.yaml），定义 train/val 路径和类别名 |
 | `epochs` | 100 | 100 | 训练总轮数，每轮遍历一次全部训练数据 |
 | `time` | — | None | 最大训练时长（小时），设置后覆盖 `epochs` |
-| `batch` | 2 | 16 | 每次梯度更新用的图片数，越大梯度越稳定但显存占用越高；`-1` 自动推断最大可用 batch |
+| `batch` | 1 | 16 | 每次梯度更新用的图片数，越大梯度越稳定但显存占用越高；`-1` 自动推断最大可用 batch |
 | `imgsz` | 1920 | 640 | 训练图片长边尺寸，图片等比缩放到此尺寸 |
 | `device` | auto | None（自动） | 训练设备：`0`=第一块 GPU，`0,1`=多 GPU，`mps`=Apple 芯片，`cpu`=CPU |
 | `workers` | — | 8 | 数据加载子进程数，Windows 上若出错可设为 0 |
@@ -254,10 +254,10 @@ cp runs/segment/<run_name>/weights/best.pt models/court_seg.pt
 | 参数 | 本项目默认值 | ultralytics 默认值 | 说明 |
 |---|---|---|---|
 | `hsv_h` | 0.0 | 0.015 | 色调随机扰动幅度（比例），增强颜色鲁棒性 |
-| `hsv_s` | 0.0 | 0.7 | 饱和度随机扰动幅度 |
-| `hsv_v` | 0.0 | 0.4 | 亮度随机扰动幅度，增强光照鲁棒性 |
+| `hsv_s` | 0.1 | 0.7 | 饱和度随机扰动幅度 |
+| `hsv_v` | 0.2 | 0.4 | 亮度随机扰动幅度，增强光照鲁棒性 |
 | `degrees` | 0.0 | 0.0 | 随机旋转角度范围（±degrees），0 表示禁用 |
-| `translate` | 0.0 | 0.1 | 随机平移幅度（图片尺寸的比例） |
+| `translate` | 0.1 | 0.1 | 随机平移幅度（图片尺寸的比例） |
 | `scale` | 0.0 | 0.5 | 随机缩放幅度（增益范围 1±scale） |
 | `shear` | — | 0.0 | 随机剪切角度（±degrees），模拟倾斜视角 |
 | `perspective` | — | 0.0 | 随机透视变换幅度（0–0.001），模拟相机角度变化 |
