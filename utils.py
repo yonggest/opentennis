@@ -95,7 +95,7 @@ def _deserialize_court(raw):
     return {
         'keypoints':      np.array(raw.get('keypoints',      [[0,0]]*14), dtype=np.float32).flatten(),
         'ground_hull':    np.array(raw.get('ground_hull',    [[0,0]]*4),  dtype=np.float32).reshape(-1, 1, 2),
-        'volume_hull':    np.array(raw.get('volume_hull',    [[0,0]]),    dtype=np.float32).reshape(-1, 1, 2),
+        'volume_hull':    np.array(raw.get('volume_hull',    [[0,0]]*4),  dtype=np.float32).reshape(-1, 1, 2),
         'vol_bottom_pts': np.array(raw.get('vol_bottom_pts', [[0,0]]*4), dtype=np.float32),
         'vol_top_pts':    np.array(raw.get('vol_top_pts',    [[0,0]]*4), dtype=np.float32),
     }
@@ -135,6 +135,10 @@ def save_coco(width, height, players, rackets, balls, path, fps=None, court=None
                     ann['track_id'] = det['track_id']
                 if 'valid' in det:
                     ann['valid'] = det['valid']
+                if 'foot' in det:
+                    ann['foot'] = det['foot']
+                if 'center' in det:
+                    ann['center'] = det['center']
                 annotations.append(ann)
                 annotation_id += 1
 
@@ -186,6 +190,10 @@ def load_detections(path):
             'track_id': ann.get('track_id'),
             'valid':    ann.get('valid', True),
         }
+        if 'foot' in ann:
+            det['foot'] = ann['foot']
+        if 'center' in ann:
+            det['center'] = ann['center']
         name = cat_id_to_name.get(ann['category_id'], '')
         if name == 'person':
             players[frame_idx].append(det)

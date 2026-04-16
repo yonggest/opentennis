@@ -13,12 +13,91 @@ import os
 import sys
 
 import numpy as np
+from scipy.ndimage import gaussian_filter1d
 
 from utils import load_detections, save_coco, iter_frames
-from tracker import BallTracker, PlayerTracker
+from tracker import BallTracker, PlayerTracker, RacketTracker
 from court_detector import COURT_W as _COURT_W
 
-_VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.mkv', '.MP4', '.MOV', '.AVI', '.MKV')
+_VIDEO_EXTENSIONS  = ('.mp4', '.mov', '.avi', '.mkv', '.MP4', '.MOV', '.AVI', '.MKV')
+_SMOOTH_SIGMA_SECONDS  = 0.1   # 球员 bbox 平滑高斯核标准差（秒）
+
+
+def _smooth_player_tracks(players, fps):
+    """对每条球员轨迹的 bbox 坐标做高斯平滑。
+    按 track_id 分组，帧号间隔 > 1 的位置切段，各段独立平滑，避免跨遮挡间隙平滑。
+    """
+    sigma = max(1.0, fps * _SMOOTH_SIGMA_SECONDS)
+
+    # 按 track_id 收集 (frame_idx, det) 列表
+    tracks: dict = {}
+    for fi, frame_dets in enumerate(players):
+        for det in frame_dets:
+            tid = det.get('track_id')
+            if tid is None:
+                continue
+            tracks.setdefault(tid, []).append((fi, det))
+
+    for frames in tracks.values():
+        frames.sort(key=lambda x: x[0])
+        # 分割连续段（帧号相邻则归入同一段）
+        segments = [[frames[0]]]
+        for k in range(1, len(frames)):
+            if frames[k][0] - frames[k - 1][0] <= 1:
+                segments[-1].append(frames[k])
+            else:
+                segments.append([frames[k]])
+
+        for seg in segments:
+            if len(seg) < 3:
+                # 段太短，直接用原始脚点
+                for _, det in seg:
+                    x1, _, x2, y2 = det['bbox']
+                    det['foot'] = [float((x1 + x2) / 2), float(y2)]
+                continue
+            fxs = np.array([(d['bbox'][0] + d['bbox'][2]) / 2 for _, d in seg])
+            fys = np.array([d['bbox'][3] for _, d in seg])
+
+            fxs = gaussian_filter1d(fxs, sigma)
+            fys = gaussian_filter1d(fys, sigma)
+
+            for k, (_, det) in enumerate(seg):
+                det['foot'] = [float(fxs[k]), float(fys[k])]
+
+    return players
+
+
+def _smooth_racket_tracks(rackets, fps):
+    """对每条球拍轨迹的中心点坐标做高斯平滑，结果写入 det['center']，bbox 不变。"""
+    sigma = max(1.0, fps * _SMOOTH_SIGMA_SECONDS)
+
+    tracks: dict = {}
+    for fi, frame_dets in enumerate(rackets):
+        for det in frame_dets:
+            tid = det.get('track_id')
+            if tid is None:
+                continue
+            tracks.setdefault(tid, []).append((fi, det))
+
+    for frames in tracks.values():
+        frames.sort(key=lambda x: x[0])
+        segments = [[frames[0]]]
+        for k in range(1, len(frames)):
+            if frames[k][0] - frames[k - 1][0] <= 1:
+                segments[-1].append(frames[k])
+            else:
+                segments.append([frames[k]])
+
+        for seg in segments:
+            cxs = np.array([(d['bbox'][0] + d['bbox'][2]) / 2 for _, d in seg])
+            cys = np.array([(d['bbox'][1] + d['bbox'][3]) / 2 for _, d in seg])
+            if len(seg) >= 3:
+                cxs = gaussian_filter1d(cxs, sigma)
+                cys = gaussian_filter1d(cys, sigma)
+            for k, (_, det) in enumerate(seg):
+                det['center'] = [float(cxs[k]), float(cys[k])]
+
+    return rackets
 
 
 def _px_per_meter(court_kps):
@@ -80,6 +159,14 @@ def main():
         conf_high=args.conf_high, conf_low=args.conf_low,
     ).run(players,
           frames=iter_frames(video_path) if video_path else None)
+    players = _smooth_player_tracks(players, fps)
+
+    # 球拍追踪
+    rackets = RacketTracker.from_video(
+        fps, ppm,
+        conf_high=args.conf_high, conf_low=args.conf_low,
+    ).run(rackets)
+    rackets = _smooth_racket_tracks(rackets, fps)
 
     # 网球追踪
     balls = BallTracker.from_video(

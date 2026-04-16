@@ -92,7 +92,7 @@ class _LinearTrack:
     _next_id = 0
 
     def __init__(self, det, frame_idx, min_hits, search_diameters, max_dist,
-                 anchor_fn=None):
+                 anchor_fn=None, use_prediction=True):
         anchor_fn = anchor_fn or _center_det
         ax, ay = anchor_fn(det)
         x1, y1, x2, y2 = det['bbox']
@@ -106,6 +106,7 @@ class _LinearTrack:
         self._bbox_d_px         = (x2 - x1 + y2 - y1) / 2.0
         self._max_dist          = max_dist
         self._anchor_fn         = anchor_fn
+        self._use_prediction    = use_prediction
         self.history            = [(frame_idx, ax, ay)]
         self.last_det           = det
         self._next_frame        = frame_idx + 1
@@ -129,7 +130,13 @@ class _LinearTrack:
         return self.search_radius
 
     def predict(self):
-        """外推到 _next_frame，更新 _pred，age+1。"""
+        """更新预测位置，age+1。
+        use_prediction=True：线性外推；False：停在上一帧位置。"""
+        if not self._use_prediction:
+            self._pred = (self.history[-1][1], self.history[-1][2])
+            self.age        += 1
+            self._next_frame += 1
+            return
         h  = self.history
         ts = np.array([p[0] for p in h], dtype=float)
         xs = np.array([p[1] for p in h], dtype=float)
@@ -137,7 +144,6 @@ class _LinearTrack:
         t0 = ts[-1]
         tn = ts - t0
         tp = self._next_frame - t0
-        # 最多取最近 _LINEAR_WINDOW 个点（不足时取全部）线性外推
         w  = _LINEAR_WINDOW
         deg = min(1, len(h) - 1)
         px = np.polyfit(tn[-w:], xs[-w:], deg)
@@ -290,7 +296,8 @@ class Tracker:
                  conf_high=0.5, conf_low=0.1,
                  search_diameters=_SEARCH_DIAMETERS, max_dist=None,
                  anchor_fn=None, size_gate=None,
-                 hist_weight=0.0, hist_gate=None):
+                 hist_weight=0.0, hist_gate=None,
+                 use_prediction=True):
         self.min_hits         = min_hits
         self.max_age          = max_age
         self.conf_high        = conf_high
@@ -301,6 +308,7 @@ class Tracker:
         self._size_gate       = size_gate
         self._hist_weight     = hist_weight
         self._hist_gate       = hist_gate
+        self._use_prediction  = use_prediction
         self._tracks: list[_LinearTrack] = []
 
     def reset(self):
@@ -372,7 +380,7 @@ class Tracker:
             new_track = _LinearTrack(
                 dets_high[di], frame_idx,
                 self.min_hits, self.search_diameters, self.max_dist,
-                anchor_fn=self._anchor_fn)
+                anchor_fn=self._anchor_fn, use_prediction=self._use_prediction)
             self._tracks.append(new_track)
             all_i_to_tid[idx_high[di]] = new_track.id
 
@@ -596,6 +604,7 @@ class PlayerTracker:
             search_diameters=None, max_dist=max_dist,
             anchor_fn=_foot_center, size_gate=size_gate,
             hist_weight=hist_weight, hist_gate=hist_gate,
+            use_prediction=False,
         )
 
     @classmethod
@@ -693,5 +702,114 @@ class PlayerTracker:
 
         n_tracked = sum(len(v) for v in tid_frames.values())
         print(f"[ player ] tracks={len(tid_frames)}  confirmed_dets={n_tracked}")
+
+        return output
+
+
+# ── 球拍追踪器 ────────────────────────────────────────────────────────────────
+
+_RACKET_MAX_SPEED_MS    = 12.0  # 球拍中心最大速度（球员移动 + 挥拍）
+_RACKET_RADIUS_MARGIN   = 1.5   # 搜索门限安全裕量
+_RACKET_GAP_SECONDS     = 0.3   # max_age 对应时长（s），遮挡续接容忍时长
+_RACKET_MIN_HIT_SECONDS = 0.04  # min_hits 对应时长（s）
+
+
+class RacketTracker:
+    """
+    球拍追踪器：以检测框中心为追踪锚点，
+    搜索门限基于球拍最大移动速度（单帧像素位移）。
+
+    推荐用 RacketTracker.from_video(fps, px_per_meter) 构造。
+    """
+
+    def __init__(self, min_hits=2, max_age=8,
+                 conf_high=0.5, conf_low=0.1, max_dist=None,
+                 size_gate=4.0):
+        self._tracker = Tracker(
+            min_hits=min_hits, max_age=max_age,
+            conf_high=conf_high, conf_low=conf_low,
+            search_diameters=None, max_dist=max_dist,
+            anchor_fn=_center_det, size_gate=size_gate,
+            use_prediction=False,
+        )
+
+    @classmethod
+    def from_video(cls, fps: float, px_per_meter: float,
+                   conf_high: float = 0.5, conf_low: float = 0.1,
+                   size_gate: float = 4.0):
+        """根据帧率和像素/米比例推算各参数。"""
+        max_dist = _RACKET_MAX_SPEED_MS / fps * px_per_meter * _RACKET_RADIUS_MARGIN
+        max_age  = max(3, round(fps * _RACKET_GAP_SECONDS))
+        min_hits = max(2, round(fps * _RACKET_MIN_HIT_SECONDS))
+        sg_str   = f"{size_gate:.1f}×" if size_gate is not None else "off"
+        print(f"[ racket ] fps={fps:.1f}  px/m={px_per_meter:.1f}  "
+              f"max_dist={max_dist:.0f}px  size_gate={sg_str}  "
+              f"max_age={max_age}f  min_hits={min_hits}f  "
+              f"conf=[{conf_low},{conf_high})")
+        return cls(min_hits=min_hits, max_age=max_age,
+                   conf_high=conf_high, conf_low=conf_low,
+                   max_dist=max_dist, size_gate=size_gate)
+
+    def run(self, racket_detections):
+        """
+        输入：racket_detections[i] = [{'bbox', 'conf', 'track_id'}, ...]
+        输出：同结构，CONFIRMED 轨迹含 track_id(int)；TENTATIVE 阶段回填。
+        遮挡间隙帧无输出（track 保活但不插值，重现后续接同一 track_id）。
+        """
+        n = len(racket_detections)
+        self._tracker.reset()
+
+        # ── 逐帧追踪 ─────────────────────────────────────────────────────────
+        tracked = []
+        for fi, frame_dets in enumerate(racket_detections):
+            result = self._tracker.step(frame_dets, fi)
+            tracked.append(result)
+
+        # ── 收集各 track_id 的检测点（含 TENTATIVE 回填）────────────────────
+        tid_frames: dict[int, list] = {}
+        tentative_hist: dict[int, list] = {}
+        for fi, frame_dets in enumerate(tracked):
+            for det in frame_dets:
+                tid  = det.get('track_id')
+                _tid = det.get('_tid')
+                if tid is not None:
+                    tid_frames.setdefault(tid, []).append((fi, det))
+                elif _tid is not None:
+                    tentative_hist.setdefault(_tid, []).append((fi, det))
+
+        for tid in list(tid_frames.keys()):
+            if tid not in tentative_hist:
+                continue
+            confirmed_frames = {fi for fi, _ in tid_frames[tid]}
+            prepend = [(fi, det) for fi, det in tentative_hist[tid]
+                       if fi not in confirmed_frames]
+            if prepend:
+                tid_frames[tid] = sorted(prepend + tid_frames[tid], key=lambda x: x[0])
+
+        # ── 写入 output ───────────────────────────────────────────────────────
+        def _clean(det, **overrides):
+            d = {k: v for k, v in det.items() if k != '_tid'}
+            d.update(overrides)
+            return d
+
+        output = [[] for _ in range(n)]
+        for tid, frames in tid_frames.items():
+            for fi, det in frames:
+                output[fi].append(_clean(det, track_id=tid))
+
+        # ── 保留未被追踪的检测（供可视化）───────────────────────────────────
+        backfilled: set[int] = set()
+        for frames in tid_frames.values():
+            for fi, det in frames:
+                if det.get('track_id') is None:
+                    backfilled.add(id(det))
+
+        for fi, frame_dets in enumerate(tracked):
+            for det in frame_dets:
+                if det.get('track_id') is None and id(det) not in backfilled:
+                    output[fi].append(_clean(det, track_id=None))
+
+        n_tracked = sum(len(v) for v in tid_frames.values())
+        print(f"[ racket ] tracks={len(tid_frames)}  confirmed_dets={n_tracked}")
 
         return output

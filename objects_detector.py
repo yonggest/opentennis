@@ -3,6 +3,31 @@ import time
 import torch
 from ultralytics import YOLO
 
+# 每类独立 NMS IoU 阈值
+_NMS_IOU_PERSON  = 0.45   # 体型稳定，标准值
+_NMS_IOU_RACKET  = 0.35   # 形变大，宁可少保留
+_NMS_IOU_BALL    = 0.65   # 目标小，避免误删
+
+
+def _iou(a, b):
+    ix1 = max(a[0], b[0]); iy1 = max(a[1], b[1])
+    ix2 = min(a[2], b[2]); iy2 = min(a[3], b[3])
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    union = (a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _nms(dets, iou_thresh):
+    """贪心 NMS：按置信度降序，IoU > iou_thresh 的重叠框移除。"""
+    if len(dets) <= 1:
+        return dets
+    dets = sorted(dets, key=lambda d: d['conf'], reverse=True)
+    keep = []
+    for d in dets:
+        if not any(_iou(d['bbox'], k['bbox']) > iou_thresh for k in keep):
+            keep.append(d)
+    return keep
+
 
 class ObjectsDetector:
     """一次推断提取 person、tennis racket、sports ball 三类目标。"""
@@ -39,6 +64,7 @@ class ObjectsDetector:
         for i, frame in enumerate(frames):
             results = self.model.predict(frame, conf=self.conf, imgsz=self.imgsz,
                                          classes=self.class_ids, device=self.device,
+                                         iou=1.0,
                                          verbose=False, save=False)[0]
             players, rackets, balls = self._parse(results)
             player_detections.append(players)
@@ -60,12 +86,14 @@ class ObjectsDetector:
         for box in results.boxes:
             cls_name = names[int(box.cls[0])]
             x1, y1, x2, y2 = box.xyxy.tolist()[0]
-            track_id = int(box.id[0]) if box.id is not None else None
-            det = {'bbox': [x1, y1, x2, y2], 'conf': float(box.conf[0]), 'track_id': track_id}
+            det = {'bbox': [x1, y1, x2, y2], 'conf': float(box.conf[0]), 'track_id': None}
             if cls_name == "person":
                 players.append(det)
             elif cls_name == "tennis racket":
                 rackets.append(det)
             elif cls_name == "sports ball":
                 balls.append(det)
+        players = _nms(players, _NMS_IOU_PERSON)
+        rackets = _nms(rackets, _NMS_IOU_RACKET)
+        balls   = _nms(balls,   _NMS_IOU_BALL)
         return players, rackets, balls

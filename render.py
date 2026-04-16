@@ -36,7 +36,7 @@ _COLOR_INV_RACKET = (40, 50, 80)     # 无效球拍
 _COLOR_INV_BALL   = (40, 40, 40)     # 无效网球
 
 # 每条球轨迹按 track_id 循环取色（BGR）
-_TRAJ_COLORS = [
+_BALL_TRAJ_COLORS = [
     (0, 255, 255), (255, 100, 0), (180, 0, 255),
     (0, 255, 100), (255, 200, 0), (0, 100, 255),
 ]
@@ -46,8 +46,10 @@ _PLAYER_TRAJ_COLORS = [
     (68, 68, 255), (68, 255, 68), (68, 255, 255), (255, 68, 255),
 ]
 
-# 球员脚步轨迹最长保留帧数（避免整段比赛画满线）
-_PLAYER_TRAJ_LEN = 90
+# 每条球拍轨迹按 track_id 循环取色（BGR）
+_RACKET_TRAJ_COLORS = [
+    (0, 136, 255), (255, 0, 170), (0, 255, 187), (170, 0, 255),
+]
 
 # 帧号字体相对于 scale_large 的放大倍数
 _FRAME_NUM_SCALE = 1.5
@@ -56,12 +58,16 @@ _FRAME_NUM_SCALE = 1.5
 _MARGIN_RATIO = 0.028
 
 
-def _traj_color(track_id):
-    return _TRAJ_COLORS[track_id % len(_TRAJ_COLORS)]
+def _ball_traj_color(track_id):
+    return _BALL_TRAJ_COLORS[track_id % len(_BALL_TRAJ_COLORS)]
 
 
 def _player_traj_color(track_id):
     return _PLAYER_TRAJ_COLORS[track_id % len(_PLAYER_TRAJ_COLORS)]
+
+
+def _racket_traj_color(track_id):
+    return _RACKET_TRAJ_COLORS[track_id % len(_RACKET_TRAJ_COLORS)]
 
 
 def _project_line(H, x1, y1, x2, y2):
@@ -92,7 +98,7 @@ def _draw_court_kps(frame, court_kps, H):
         cv2.circle(frame, tuple(pt), 4, _COLOR_COURT, -1)
 
 
-def _build_traj(balls):
+def _build_ball_traj(balls):
     """预计算各轨迹的全部中心点：{track_id: [(frame_idx, cx, cy), ...]}。"""
     traj = defaultdict(list)
     for fi, frame_balls in enumerate(balls):
@@ -113,17 +119,37 @@ def _build_player_traj(players):
         for det in frame_players:
             tid = det.get('track_id')
             if tid is not None and det.get('valid', True):
-                x1, y1, x2, y2 = det['bbox']
-                traj[tid].append((fi, int((x1 + x2) / 2), int(y2)))
+                if 'foot' in det:
+                    fx, fy = det['foot']
+                else:
+                    x1, y1, x2, y2 = det['bbox']
+                    fx, fy = (x1 + x2) / 2, y2
+                traj[tid].append((fi, int(fx), int(fy)))
     return traj
 
 
-def _draw_invalid_bbox(frame, bbox, color):
+def _build_racket_traj(rackets):
+    """预计算各球拍轨迹的中心位置：{track_id: [(frame_idx, cx, cy), ...]}，仅含有效检测。"""
+    traj = defaultdict(list)
+    for fi, frame_rackets in enumerate(rackets):
+        for det in frame_rackets:
+            tid = det.get('track_id')
+            if tid is not None and det.get('valid', True):
+                if 'center' in det:
+                    cx, cy = det['center']
+                else:
+                    x1, y1, x2, y2 = det['bbox']
+                    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+                traj[tid].append((fi, int(cx), int(cy)))
+    return traj
+
+
+def _draw_invalid_bbox(frame, bbox, color, thick=1):
     """用暗色调矩形 + 对角线 X 标注无效物体。"""
     x1, y1, x2, y2 = [int(v) for v in bbox]
-    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1)
-    cv2.line(frame, (x1, y1), (x2, y2), color, 1)
-    cv2.line(frame, (x2, y1), (x1, y2), color, 1)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, thick)
+    cv2.line(frame, (x1, y1), (x2, y2), color, thick)
+    cv2.line(frame, (x2, y1), (x1, y2), color, thick)
 
 
 def _draw_outside_masks(frame, pts_bot, pts_top, alpha=0.4):
@@ -186,26 +212,26 @@ def _draw_volume_wireframe(frame, pts_bot, pts_top, color):
 
 
 def _draw_frame(frame, fi, court_kps, H, pts_vol_bot, pts_vol_top,
-                players, rackets, balls, traj, player_traj,
+                players, rackets, balls, ball_traj, player_traj, racket_traj,
                 players_inv, rackets_inv, balls_inv,
                 scale, thick, scale_large, thick_large, margin):
-    """原地修改单帧：绘制球场轮廓、缓冲区立方体、检测框、球/球员轨迹、帧号。"""
+    """原地修改单帧：绘制球场轮廓、缓冲区立方体、检测框、球/球员/球拍轨迹、帧号。"""
     _draw_court_kps(frame, court_kps, H)
     _draw_outside_masks(frame, pts_vol_bot, pts_vol_top)
     _draw_volume_wireframe(frame, pts_vol_bot, pts_vol_top, _COLOR_VOLUME)
 
     # 无效物体（暗色 + X）
     for det in players_inv[fi]:
-        _draw_invalid_bbox(frame, det['bbox'], _COLOR_INV_PLAYER)
+        _draw_invalid_bbox(frame, det['bbox'], _COLOR_INV_PLAYER, 1)
     for det in rackets_inv[fi]:
-        _draw_invalid_bbox(frame, det['bbox'], _COLOR_INV_RACKET)
+        _draw_invalid_bbox(frame, det['bbox'], _COLOR_INV_RACKET, 1)
     for det in balls_inv[fi]:
-        _draw_invalid_bbox(frame, det['bbox'], _COLOR_INV_BALL)
+        _draw_invalid_bbox(frame, det['bbox'], _COLOR_INV_BALL, 1)
 
     # 有效球员
     for det in players[fi]:
         x1, y1, x2, y2 = [int(v) for v in det['bbox']]
-        cv2.rectangle(frame, (x1, y1), (x2, y2), _COLOR_PLAYER, 2)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), _COLOR_PLAYER, thick)
         if det.get('track_id') is not None:
             cv2.putText(frame, f"P{det['track_id']}", (x1, y1 - 6),
                         cv2.FONT_HERSHEY_SIMPLEX, scale, _COLOR_PLAYER, thick)
@@ -213,28 +239,37 @@ def _draw_frame(frame, fi, court_kps, H, pts_vol_bot, pts_vol_top,
     # 有效球拍
     for det in rackets[fi]:
         x1, y1, x2, y2 = [int(v) for v in det['bbox']]
-        cv2.rectangle(frame, (x1, y1), (x2, y2), _COLOR_RACKET, 2)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), _COLOR_RACKET, thick)
+        if det.get('track_id') is not None:
+            cv2.putText(frame, f"R{det['track_id']}", (x1, y1 - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, scale, _COLOR_RACKET, thick)
 
-    # 球员脚步轨迹（最近 _PLAYER_TRAJ_LEN 帧）
-    for tid, pts in player_traj.items():
-        color   = _player_traj_color(tid)
-        visible = [(fx, fy) for fj, fx, fy in pts
-                   if fj <= fi and fi - fj < _PLAYER_TRAJ_LEN]
-        for k in range(len(visible) - 1):
-            cv2.line(frame, visible[k], visible[k + 1], color, 2)
-
-    # 球轨迹（已出现的点）
-    for tid, pts in traj.items():
-        color   = _traj_color(tid)
+    # 球拍中心轨迹
+    for tid, pts in racket_traj.items():
+        color   = _racket_traj_color(tid)
         visible = [(cx, cy) for fj, cx, cy in pts if fj <= fi]
         for k in range(len(visible) - 1):
-            cv2.arrowedLine(frame, visible[k], visible[k + 1], color, 2, tipLength=0.4)
+            cv2.arrowedLine(frame, visible[k], visible[k + 1], color, thick, tipLength=0.3)
+
+    # 球员脚步全量历史轨迹（不含将来帧，无帧数窗口上限）
+    for tid, pts in player_traj.items():
+        color   = _player_traj_color(tid)
+        visible = [(fx, fy) for fj, fx, fy in pts if fj <= fi]
+        for k in range(len(visible) - 1):
+            cv2.arrowedLine(frame, visible[k], visible[k + 1], color, thick, tipLength=0.3)
+
+    # 球轨迹（已出现的点）
+    for tid, pts in ball_traj.items():
+        color   = _ball_traj_color(tid)
+        visible = [(cx, cy) for fj, cx, cy in pts if fj <= fi]
+        for k in range(len(visible) - 1):
+            cv2.arrowedLine(frame, visible[k], visible[k + 1], color, thick, tipLength=0.3)
 
     # 有效球框
     for det in balls[fi]:
         x1, y1, x2, y2 = [int(v) for v in det['bbox']]
         tid   = det.get('track_id')
-        color = _traj_color(tid) if tid is not None else _COLOR_BALL_NONE
+        color = _ball_traj_color(tid) if tid is not None else _COLOR_BALL_NONE
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, thick)
 
     # 帧号
@@ -285,8 +320,9 @@ def main():
     balls       = [[d for d in f if     d['valid']] for f in balls_raw]
     balls_inv   = [[d for d in f if not d['valid']] for f in balls_raw]
 
-    traj        = _build_traj(balls)
+    ball_traj   = _build_ball_traj(balls)
     player_traj = _build_player_traj(players_raw)
+    racket_traj = _build_racket_traj(rackets_raw)
 
     scale, thick             = text_params(height)
     scale_large, thick_large = text_params(height, base_height=1080)
@@ -301,7 +337,7 @@ def main():
     with open_video_writer(output_path, fps, width, height) as pipe:
         for fi, frame in enumerate(iter_frames(args.input)):
             _draw_frame(frame, fi, court_kps, H, pts_vol_bot, pts_vol_top,
-                        players, rackets, balls, traj, player_traj,
+                        players, rackets, balls, ball_traj, player_traj, racket_traj,
                         players_inv, rackets_inv, balls_inv,
                         scale, thick, scale_large, thick_large, margin)
             pipe.write(frame.tobytes())

@@ -81,7 +81,8 @@ def main():
     }
 
     # ── 物体检测（全部帧，全图推理）──────────────────────────────────────────
-    obj_detector = ObjectsDetector(args.object_model, conf=args.conf, imgsz=args.imgsz, device=args.device)
+    obj_detector = ObjectsDetector(args.object_model, conf=args.conf, imgsz=args.imgsz,
+                                    device=args.device)
     players, rackets, balls = obj_detector.run(
         iter_frames(args.input),
         total=n_frames,
