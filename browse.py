@@ -46,6 +46,10 @@ _TRAJ_COLORS = [
 ]
 _BALL_UNTRACKED_COLOR = QColor("#804020")   # 未被 track 的网球（暗橙）
 _TRAJ_FADE_FRAMES = 60    # 轨迹淡出窗口（帧数）
+_PLAYER_TRAJ_COLORS = [
+    QColor("#ff4444"), QColor("#44ff44"), QColor("#ffff44"), QColor("#ff44ff"),
+]
+_PLAYER_TRAJ_FADE_FRAMES = 120   # 球员轨迹淡出窗口（帧数，较长）
 _SEARCH_DIAMETERS  = 2.0   # 搜索半径倍数，与 tracker.py 默认值一致
 _GAP_SECONDS       = 0.5   # 轨迹最大间隙时长（s），与 tracker.py _GAP_SECONDS 保持一致
 _MAX_SPEED_MS      = 70.0  # 职业发球上限（m/s），与 tracker.py 一致
@@ -132,6 +136,8 @@ class BrowseApp(QMainWindow):
         self.visible_cats: set = set(cat_ids)
         self.ball_cids: set = {cid for cid, name in categories.items()
                                if "ball" in name.lower()}
+        self.player_cids: set = {cid for cid, name in categories.items()
+                                 if "person" in name.lower()}
         # 是否来自 track 阶段：有任意球标注的 track_id != None 则为 True
         # detected JSON 中所有 track_id 均为 None，不应把 None 视为"被追踪器拒绝"
         self._has_tracked: bool = any(
@@ -140,9 +146,11 @@ class BrowseApp(QMainWindow):
             for ann in anns
             if ann.get("category_id") in self.ball_cids
         )
-        self.show_court: bool  = court is not None
-        self.show_traj:  bool  = True
+        self.show_court: bool       = court is not None
+        self.show_traj:  bool       = True
+        self.show_player_traj: bool = True
         self._traj          = self._build_trajectories()
+        self._player_traj   = self._build_player_trajectories()
 
         self.cap = cv2.VideoCapture(str(video_path))
         if not self.cap.isOpened():
@@ -221,6 +229,18 @@ class BrowseApp(QMainWindow):
         """)
         self.traj_btn.clicked.connect(self._toggle_traj)
         tl.addWidget(self.traj_btn)
+
+        self.player_traj_btn = QPushButton("  球员轨迹  ")
+        self.player_traj_btn.setCheckable(True); self.player_traj_btn.setChecked(True)
+        self.player_traj_btn.setStyleSheet("""
+            QPushButton         { background:#2a2a2a; color:#666; border:none;
+                                  padding:4px 10px; font:11pt Menlo; }
+            QPushButton:checked { background:#3a0020; color:#ccc;
+                                  border:1px solid #ff4444; }
+            QPushButton:hover   { background:#3a0020; color:white; }
+        """)
+        self.player_traj_btn.clicked.connect(self._toggle_player_traj)
+        tl.addWidget(self.player_traj_btn)
 
         tl.addStretch()
         self.status_lbl = QLabel("", styleSheet="color:#4ec9b0; font:11pt Menlo;")
@@ -449,7 +469,10 @@ class BrowseApp(QMainWindow):
                         lbl.setZValue(len(anns_sorted) + z + 1)
                 continue
 
-            label = self.category_labels.get(cid, "?")
+            if cid in self.player_cids and track_id is not None:
+                label = f"P{track_id}"
+            else:
+                label = self.category_labels.get(cid, "?")
             score = ann.get("score")
             if score is not None and score != 1.0:
                 label = f"{label} {score:.2f}"
@@ -464,6 +487,9 @@ class BrowseApp(QMainWindow):
         if self.show_traj and self._traj:
             self._render_trajectories()
             self._render_predictions()
+
+        if self.show_player_traj and self._player_traj:
+            self._render_player_trajectories()
 
         if self.show_court and self.court:
             self._render_court(font_size)
@@ -592,6 +618,28 @@ class BrowseApp(QMainWindow):
             pts.sort(key=lambda t: t[0])
         return traj
 
+    def _build_player_trajectories(self) -> dict[int, list[tuple[int, float, float]]]:
+        """返回 {track_id: [(frame_idx, foot_x, foot_y), ...]}，仅含有效的、已追踪球员标注。
+        使用检测框底部中心（脚步位置）作为轨迹锚点。
+        """
+        traj: dict[int, list] = {}
+        for frame_idx, anns in self.frame_anns.items():
+            for ann in anns:
+                tid = ann.get("track_id")
+                if tid is None or ann.get("category_id") not in self.player_cids:
+                    continue
+                if not ann.get("valid", True):
+                    continue
+                x, y, w, h = ann["bbox"]
+                fx, fy = x + w / 2, y + h
+                traj.setdefault(tid, []).append((frame_idx, fx, fy))
+        for pts in traj.values():
+            pts.sort(key=lambda t: t[0])
+        return traj
+
+    def _player_traj_color(self, track_id: int) -> QColor:
+        return _PLAYER_TRAJ_COLORS[track_id % len(_PLAYER_TRAJ_COLORS)]
+
     def _compute_max_dist(self) -> float | None:
         """从 court keypoints + fps 推算单帧最大球速像素位移（与 tracker.py effective_gate 的 max_dist 一致）。"""
         if not self.court:
@@ -698,8 +746,31 @@ class BrowseApp(QMainWindow):
                 c_pen, QBrush(Qt.NoBrush),
             ).setZValue(11)
 
+    def _render_player_trajectories(self):
+        """绘制当前帧及之前的球员脚步轨迹线段（淡出效果）。"""
+        cur = self.current_frame
+        for tid, pts in self._player_traj.items():
+            color = self._player_traj_color(tid)
+            prev = None
+            for frame_idx, fx, fy in pts:
+                if frame_idx > cur:
+                    break
+                if prev is not None:
+                    pf, px, py = prev
+                    if frame_idx - pf <= self._traj_max_age:
+                        alpha = int(255 * max(0.15, 1.0 - (cur - frame_idx) / _PLAYER_TRAJ_FADE_FRAMES))
+                        c = QColor(color)
+                        c.setAlpha(alpha)
+                        p = QPen(c, 2); p.setCosmetic(True)
+                        self.scene.addLine(px, py, fx, fy, p).setZValue(10)
+                prev = (frame_idx, fx, fy)
+
     def _toggle_traj(self):
         self.show_traj = not self.show_traj
+        self._redraw()
+
+    def _toggle_player_traj(self):
+        self.show_player_traj = not self.show_player_traj
         self._redraw()
 
     def _toggle_category(self, cat_id: int):
