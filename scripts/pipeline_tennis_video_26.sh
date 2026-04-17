@@ -13,7 +13,7 @@ set -uo pipefail
 
 DATASET_DIR="../datasets/tennis-video-26"
 OUTPUT_ROOT="runs/in-out/tennis-video-26.out"
-OBJECT_MODEL="models/yolo26x-finetuned.pt"
+OBJECT_MODEL="models/yolo26x"
 COURT_MODEL="models/yolov8n-seg-finetuned.pt"
 CONF_HIGH=0.5   # 高置信度阈值：>= 此值的检测可新建轨迹
 CONF_LOW=0.1    # 低置信度下限：detect.py 的 -c，[low,high) 的检测仅续接已有轨迹

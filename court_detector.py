@@ -219,8 +219,12 @@ class CourtDetector:
         h, w = frame.shape[:2]
         results = self._run_seg(frame)
         if not results or results[0].masks is None or len(results[0].masks) == 0:
+            confs = results[0].boxes.conf.tolist() if results and results[0].boxes is not None else []
+            print(f"[   court] seg: no masks  boxes={len(confs)}  confs={[f'{c:.4f}' for c in confs]}", flush=True)
             raise RuntimeError("YOLO seg: no court detected")
+        confs = results[0].boxes.conf.tolist()
         best = int(results[0].boxes.conf.argmax())
+        print(f"[   court] seg: {len(confs)} detection(s)  confs={[f'{c:.4f}' for c in confs]}  best={best}", flush=True)
         poly = results[0].masks.xy[best].astype(np.int32)
         mask = np.zeros((h, w), dtype=np.uint8)
         cv2.fillPoly(mask, [poly], 255)

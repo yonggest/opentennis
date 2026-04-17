@@ -29,7 +29,7 @@ if [[ $# -eq 2 ]]; then
   OBJECT_MODEL="$1"
   target_name="$2"
 else
-  OBJECT_MODEL="models/yolo26x-finetuned.pt"
+  OBJECT_MODEL="models/yolo26x.pt"
   target_name="$1"
 fi
 video="$(find "$DATASET_DIR" -name "$target_name" | head -1)"
