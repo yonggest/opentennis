@@ -8,6 +8,7 @@ models/*
 !models/put_models_here.txt
 !models/yolo26x.pt
 !models/yolo26n.pt
+!models/yolo26n-seg.pt
 
 # Output videos and debug images
 output_videos/
