@@ -9,6 +9,7 @@ models/*
 !models/yolo26x.pt
 !models/yolo26n.pt
 !models/yolo26n-seg.pt
+!models/yolo26x-pose.pt
 
 # Output videos and debug images
 output_videos/

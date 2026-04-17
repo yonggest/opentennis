@@ -54,6 +54,13 @@ _RACKET_TRAJ_COLORS = [
     QColor("#ff8800"), QColor("#aa00ff"), QColor("#00ffbb"), QColor("#ff0099"),
 ]
 _RACKET_TRAJ_FADE_FRAMES = 60    # 球拍轨迹淡出窗口（帧数）
+_SKELETON = [
+    (0, 1), (0, 2), (1, 3), (2, 4),
+    (5, 7), (7, 9), (6, 8), (8, 10),
+    (5, 6), (5, 11), (6, 12), (11, 12),
+    (11, 13), (13, 15), (12, 14), (14, 16),
+]
+_KP_CONF_THRESH = 0.3
 _SEARCH_DIAMETERS  = 2.0   # 搜索半径倍数，与 tracker.py 默认值一致
 _GAP_SECONDS       = 0.5   # 轨迹最大间隙时长（s），与 tracker.py _GAP_SECONDS 保持一致
 _MAX_SPEED_MS      = 70.0  # 职业发球上限（m/s），与 tracker.py 一致
@@ -118,6 +125,8 @@ def load_annotations(json_path: Path) -> tuple[dict, dict, dict | None]:
             entry["foot"] = ann["foot"]
         if "center" in ann:
             entry["center"] = ann["center"]
+        if "keypoints" in ann:
+            entry["keypoints"] = ann["keypoints"]
         frame_anns.setdefault(ann["image_id"], []).append(entry)
 
     court = data.get("court")
@@ -182,6 +191,7 @@ class BrowseApp(QMainWindow):
         self.show_ball_traj:  bool       = True
         self.show_player_traj: bool = True
         self.show_racket_traj: bool = True
+        self.show_pose: bool        = True
         self._ball_traj          = self._build_ball_trajectories()
         self._player_traj   = self._build_player_trajectories()
         self._racket_traj   = self._build_racket_trajectories()
@@ -287,6 +297,18 @@ class BrowseApp(QMainWindow):
         """)
         self.racket_traj_btn.clicked.connect(self._toggle_racket_traj)
         tl.addWidget(self.racket_traj_btn)
+
+        self.pose_btn = QPushButton("  姿态  ")
+        self.pose_btn.setCheckable(True); self.pose_btn.setChecked(True)
+        self.pose_btn.setStyleSheet("""
+            QPushButton         { background:#2a2a2a; color:#666; border:none;
+                                  padding:4px 10px; font:11pt Menlo; }
+            QPushButton:checked { background:#003a20; color:#ccc;
+                                  border:1px solid #00ff80; }
+            QPushButton:hover   { background:#003a20; color:white; }
+        """)
+        self.pose_btn.clicked.connect(self._toggle_pose)
+        tl.addWidget(self.pose_btn)
 
         tl.addStretch()
         self.status_lbl = QLabel("", styleSheet="color:#4ec9b0; font:11pt Menlo;")
@@ -541,6 +563,9 @@ class BrowseApp(QMainWindow):
 
         if self.show_racket_traj and self._racket_traj:
             self._render_racket_trajectories()
+
+        if self.show_pose:
+            self._render_skeletons(anns)
 
         if self.show_court and self.court:
             self._render_court(font_size)
@@ -869,8 +894,44 @@ class BrowseApp(QMainWindow):
         self.show_player_traj = not self.show_player_traj
         self._redraw()
 
+    def _render_skeletons(self, anns):
+        """绘制当前帧所有有效球员的姿态骨架。"""
+        for ann in anns:
+            if ann.get("category_id") not in self.player_cids:
+                continue
+            if not ann.get("valid", True):
+                continue
+            if "keypoints" not in ann:
+                continue
+            kps = ann["keypoints"]  # list of 17 [x, y, conf]
+            track_id = ann.get("track_id")
+            if track_id is not None:
+                color = _PLAYER_TRAJ_COLORS[track_id % len(_PLAYER_TRAJ_COLORS)]
+            else:
+                color = QColor("#00ff80")
+            pen = QPen(color, 2)
+            pen.setCosmetic(True)
+            for (i, j) in _SKELETON:
+                if i >= len(kps) or j >= len(kps):
+                    continue
+                xi, yi, ci = kps[i]
+                xj, yj, cj = kps[j]
+                if ci >= _KP_CONF_THRESH and cj >= _KP_CONF_THRESH:
+                    self.scene.addLine(float(xi), float(yi), float(xj), float(yj),
+                                       pen).setZValue(20)
+            for kp in kps:
+                x, y, c = kp
+                if c >= _KP_CONF_THRESH:
+                    r = 4
+                    self.scene.addEllipse(float(x) - r, float(y) - r, r * 2, r * 2,
+                                          pen, QBrush(color)).setZValue(20)
+
     def _toggle_racket_traj(self):
         self.show_racket_traj = not self.show_racket_traj
+        self._redraw()
+
+    def _toggle_pose(self):
+        self.show_pose = not self.show_pose
         self._redraw()
 
     def _toggle_category(self, cat_id: int):

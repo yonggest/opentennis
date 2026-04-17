@@ -20,7 +20,7 @@ def parse_args():
     p.add_argument("--model",   default=str(Path(__file__).parent / "models/yolo26n-seg.pt"), help="预训练权重路径")
     p.add_argument("--data",    required=True,               help="数据集配置文件（如 datasets/xxx-seg/data.yaml）")
     p.add_argument("--lr0",     type=float, default=0.001,   help="初始学习率（微调时比默认小）")
-    p.add_argument("--epochs",  type=int,   default=100,     help="训练轮数")
+    p.add_argument("--epochs",  type=int,   default=50,      help="训练轮数")
     p.add_argument("--device",  default="",                  help="'mps'/'cpu'/'0'(CUDA)，留空自动选择")
     if len(sys.argv) == 1:
         p.print_help()
@@ -41,7 +41,7 @@ def main():
     print(f"  lr0            {args.lr0}")
     print(f"  lrf            0.1")
     print(f"  optimizer      AdamW")
-    print(f"  freeze         0")
+    print(f"  freeze         9")
     print(f"  warmup_epochs  1")
     print(f"  patience       20")
     print(f"  save_period    5")
@@ -69,7 +69,7 @@ def main():
         batch=1,
         lr0=args.lr0,
         imgsz=640,
-        freeze=0,            # 全量微调，提升跨场地泛化能力
+        freeze=9,            # 冻结 backbone（0–8），训练 neck + head
         lrf=0.1,             # 最终学习率 = lr0 * lrf
         warmup_epochs=1,
         patience=20,

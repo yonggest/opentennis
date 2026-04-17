@@ -51,6 +51,16 @@ _RACKET_TRAJ_COLORS = [
     (0, 136, 255), (255, 0, 170), (0, 255, 187), (170, 0, 255),
 ]
 
+# COCO 17点骨架连接
+_SKELETON = [
+    (0, 1), (0, 2), (1, 3), (2, 4),          # 头部
+    (5, 7), (7, 9), (6, 8), (8, 10),          # 手臂
+    (5, 6), (5, 11), (6, 12), (11, 12),       # 躯干
+    (11, 13), (13, 15), (12, 14), (14, 16),   # 腿部
+]
+_COLOR_SKELETON = (0, 255, 128)   # 骨架颜色
+_KP_CONF_THRESH = 0.3             # 关键点置信度阈值
+
 # 帧号字体相对于 scale_large 的放大倍数
 _FRAME_NUM_SCALE = 1.5
 
@@ -211,6 +221,22 @@ def _draw_volume_wireframe(frame, pts_bot, pts_top, color):
         cv2.line(frame, tuple(pts_b[i]), tuple(pts_t[i]), color, 1)
 
 
+def _draw_skeleton(frame, keypoints, thick):
+    """绘制 COCO 17 关键点骨架。"""
+    for (i, j) in _SKELETON:
+        if i >= len(keypoints) or j >= len(keypoints):
+            continue
+        xi, yi, ci = keypoints[i]
+        xj, yj, cj = keypoints[j]
+        if ci >= _KP_CONF_THRESH and cj >= _KP_CONF_THRESH:
+            cv2.line(frame, (int(xi), int(yi)), (int(xj), int(yj)),
+                     _COLOR_SKELETON, thick)
+    for kp in keypoints:
+        x, y, c = kp
+        if c >= _KP_CONF_THRESH:
+            cv2.circle(frame, (int(x), int(y)), 3, _COLOR_SKELETON, -1)
+
+
 def _draw_frame(frame, fi, court_kps, H, pts_vol_bot, pts_vol_top,
                 players, rackets, balls, ball_traj, player_traj, racket_traj,
                 players_inv, rackets_inv, balls_inv,
@@ -235,6 +261,11 @@ def _draw_frame(frame, fi, court_kps, H, pts_vol_bot, pts_vol_top,
         if det.get('track_id') is not None:
             cv2.putText(frame, f"P{det['track_id']}", (x1, y1 - 6),
                         cv2.FONT_HERSHEY_SIMPLEX, scale, _COLOR_PLAYER, thick)
+
+    # 球员姿态骨架
+    for det in players[fi]:
+        if 'keypoints' in det:
+            _draw_skeleton(frame, det['keypoints'], thick)
 
     # 有效球拍
     for det in rackets[fi]:

@@ -139,6 +139,8 @@ def save_coco(width, height, players, rackets, balls, path, fps=None, court=None
                     ann['foot'] = det['foot']
                 if 'center' in det:
                     ann['center'] = det['center']
+                if 'keypoints' in det:
+                    ann['keypoints'] = det['keypoints']
                 annotations.append(ann)
                 annotation_id += 1
 
@@ -194,6 +196,8 @@ def load_detections(path):
             det['foot'] = ann['foot']
         if 'center' in ann:
             det['center'] = ann['center']
+        if 'keypoints' in ann:
+            det['keypoints'] = ann['keypoints']
         name = cat_id_to_name.get(ann['category_id'], '')
         if name == 'person':
             players[frame_idx].append(det)
