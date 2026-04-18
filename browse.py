@@ -187,6 +187,12 @@ class BrowseApp(QMainWindow):
             for ann in anns
             if ann.get("category_id") in self.ball_cids
         )
+        # parse.py 之后的 JSON 标注含 valid 字段；有 valid 说明已过滤，不应再显示搜索圆
+        self._has_parsed: bool = any(
+            "valid" in ann
+            for anns in frame_anns.values()
+            for ann in anns
+        )
         self.show_court: bool       = court is not None
         self.show_ball_traj:  bool       = True
         self.show_player_traj: bool = True
@@ -556,7 +562,8 @@ class BrowseApp(QMainWindow):
 
         if self.show_ball_traj and self._ball_traj:
             self._render_ball_trajectories()
-            self._render_predictions()
+            if not self._has_parsed:
+                self._render_predictions()
 
         if self.show_player_traj and self._player_traj:
             self._render_player_trajectories()

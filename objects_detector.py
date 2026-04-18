@@ -1,6 +1,16 @@
 import time
 
 import torch
+
+
+def _fmt(seconds):
+    """将秒数格式化为 0:05、1:23、2:07:45 等形式。"""
+    s = int(seconds)
+    h, rem = divmod(s, 3600)
+    m, s   = divmod(rem, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
 from ultralytics import YOLO
 
 # 每类独立 NMS IoU 阈值
@@ -71,13 +81,17 @@ class ObjectsDetector:
             racket_detections.append(rackets)
             ball_detections.append(balls)
             if total:
-                pct = (i + 1) * 100 // total
-                print(f"[  detect] {i+1:>{frame_num_width}}/{total} frames  ({pct:>3}%)", end='\r', flush=True)
+                done    = i + 1
+                pct     = done * 100 // total
+                elapsed = time.time() - t0
+                eta     = elapsed / done * (total - done)
+                print(f"[  detect] {done:>{frame_num_width}}/{total}  {pct:>3}%"
+                      f"  elapsed {_fmt(elapsed):>7}  ETA {_fmt(eta):>7}", end='\r', flush=True)
             else:
-                print(f"[  detect] {i+1} frames", end='\r', flush=True)
+                print(f"[  detect] {i+1} frames  elapsed {_fmt(time.time()-t0)}", end='\r', flush=True)
 
         n_frames = len(player_detections)
-        print(f"[  detect] {n_frames} frames  (100%)  done: {time.time()-t0:>6.1f}s")
+        print(f"[  detect] {n_frames}/{n_frames}  100%  elapsed {_fmt(time.time()-t0):>7}  ETA    0:00  done")
         return player_detections, racket_detections, ball_detections
 
     def _parse(self, results):
