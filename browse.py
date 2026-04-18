@@ -24,7 +24,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFrame, QGraphicsScene, QGraphicsView,
     QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow,
-    QPushButton, QSlider, QSplitter, QVBoxLayout, QWidget,
+    QPushButton, QSlider, QSplitter, QTextBrowser, QVBoxLayout, QWidget,
 )
 
 # ── 常量 ──────────────────────────────────────────────────────────────────────
@@ -129,8 +129,10 @@ def load_annotations(json_path: Path) -> tuple[dict, dict, dict | None]:
             entry["keypoints"] = ann["keypoints"]
         frame_anns.setdefault(ann["image_id"], []).append(entry)
 
-    court = data.get("court")
-    return frame_anns, cats, court
+    court     = data.get("court")
+    video_rel = data.get("video")
+    video_abs = (json_path.parent / video_rel).resolve() if video_rel else None
+    return frame_anns, cats, court, video_abs
 
 
 # ── View（缩放/平移） ─────────────────────────────────────────────────────────
@@ -268,7 +270,7 @@ class BrowseApp(QMainWindow):
             self.court_btn.clicked.connect(self._toggle_court)
             tl.addWidget(self.court_btn)
 
-        self.ball_traj_btn = QPushButton("  轨迹  ")
+        self.ball_traj_btn = QPushButton("  网球轨迹  ")
         self.ball_traj_btn.setCheckable(True); self.ball_traj_btn.setChecked(True)
         self.ball_traj_btn.setStyleSheet("""
             QPushButton         { background:#2a2a2a; color:#666; border:none;
@@ -304,7 +306,7 @@ class BrowseApp(QMainWindow):
         self.racket_traj_btn.clicked.connect(self._toggle_racket_traj)
         tl.addWidget(self.racket_traj_btn)
 
-        self.pose_btn = QPushButton("  姿态  ")
+        self.pose_btn = QPushButton("  球员姿态  ")
         self.pose_btn.setCheckable(True); self.pose_btn.setChecked(True)
         self.pose_btn.setStyleSheet("""
             QPushButton         { background:#2a2a2a; color:#666; border:none;
@@ -397,11 +399,22 @@ class BrowseApp(QMainWindow):
         rl.addWidget(ctrl)
         rl.addWidget(hint)
 
-        # 分割器：左=帧号列表，右=主视图
+        # 右侧信息面板
+        self.info_browser = QTextBrowser()
+        self.info_browser.setFixedWidth(210)
+        self.info_browser.setReadOnly(True)
+        self.info_browser.setOpenLinks(False)
+        self.info_browser.setStyleSheet(
+            "QTextBrowser { background:#141414; border:none;"
+            " border-left:1px solid #2d2d2d; }"
+        )
+
+        # 分割器：左=帧号列表，中=主视图，右=信息面板
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self.frame_list)
         splitter.addWidget(right)
-        splitter.setSizes([_LIST_W, 1280])
+        splitter.addWidget(self.info_browser)
+        splitter.setSizes([_LIST_W, 1060, 210])
         splitter.setHandleWidth(2)
         splitter.setStyleSheet("QSplitter::handle { background:#333; }")
 
@@ -446,6 +459,7 @@ class BrowseApp(QMainWindow):
             self.frame_list.item(self.current_frame),
             QAbstractItemView.PositionAtCenter,
         )
+        self._update_info_panel()
 
     def _redraw(self):
         self.scene.clear()
@@ -959,6 +973,99 @@ class BrowseApp(QMainWindow):
         self.status_lbl.setText(
             f"帧 {self.current_frame}  ·  {n_visible} 个标注  ·  {self.fps:.1f} fps")
 
+    def _update_info_panel(self):
+        fi   = self.current_frame
+        anns = self.frame_anns.get(fi, [])
+        time_s = fi / self.fps if self.fps else 0.0
+
+        # ── 按类别 + valid 分类 ────────────────────────────────────────────────
+        def _split(cids):
+            v = [a for a in anns if a.get('category_id') in cids and     a.get('valid', True)]
+            i = [a for a in anns if a.get('category_id') in cids and not a.get('valid', True)]
+            return v, i
+
+        v_balls,   inv_balls   = _split(self.ball_cids)
+        v_persons, inv_persons = _split(self.player_cids)
+        v_rackets, inv_rackets = _split(self.racket_cids)
+
+        # ── 合理性判断（仅 parse 后有意义）────────────────────────────────────
+        def _status(count, valid_counts):
+            """返回 (icon, color_hex)"""
+            if count == 0:
+                return '—', '#555555'
+            if count in valid_counts:
+                return '✓', '#4ec9b0'
+            return '✗', '#ff4444'
+
+        ball_icon,   ball_color   = _status(len(v_balls),   {1})
+        person_icon, person_color = _status(len(v_persons), {2, 4})
+        racket_icon, racket_color = _status(len(v_rackets), {2, 4})
+
+        # ── track_id 列表 ──────────────────────────────────────────────────────
+        def _tids(dets):
+            ids = sorted({a['track_id'] for a in dets if a.get('track_id') is not None})
+            return ' '.join(f'#{t}' for t in ids) if ids else '—'
+
+        S  = 'font-family:Menlo,monospace; font-size:10pt;'
+        DIM = '#555555'
+        HDR = '#777777'
+
+        def row(label, count, icon, color, tids=''):
+            tid_html = (f'<br><span style="color:{DIM}; font-size:9pt;">'
+                        f'&nbsp;&nbsp;&nbsp;{tids}</span>') if tids and tids != '—' else ''
+            return (f'<tr>'
+                    f'<td style="color:{HDR}; padding:1px 4px 1px 0;">{label}</td>'
+                    f'<td style="color:#cccccc; padding:1px 6px; text-align:right;">{count}</td>'
+                    f'<td style="color:{color}; padding:1px 4px;">{icon}</td>'
+                    f'</tr>'
+                    + (f'<tr><td colspan="3" style="color:{DIM}; font-size:9pt; padding:0 4px 3px 4px;">'
+                       f'{tids}</td></tr>' if tids and tids != '—' else ''))
+
+        # ── 无效行（只在 parsed 后显示）───────────────────────────────────────
+        def inv_row(label, count):
+            c = '#666666' if count == 0 else '#ff8844'
+            return (f'<tr>'
+                    f'<td style="color:{DIM}; padding:1px 4px 1px 0;">{label}</td>'
+                    f'<td style="color:{c}; padding:1px 6px; text-align:right;">{count}</td>'
+                    f'<td></td></tr>')
+
+        sep = f'<tr><td colspan="3"><hr style="border:none; border-top:1px solid #2d2d2d; margin:4px 0;"></td></tr>'
+
+        html_parts = [
+            f'<html><body style="{S} background:#141414; color:#aaa; padding:8px;">',
+            f'<p style="color:#4ec9b0; margin:0 0 2px 0; font-size:10pt;">'
+            f'帧 {fi:>5}</p>',
+            f'<p style="color:{DIM}; margin:0 0 6px 0; font-size:9pt;">'
+            f'{time_s:.2f}s</p>',
+            f'<table cellspacing="0" cellpadding="0" width="100%">',
+            sep,
+        ]
+
+        if self._has_parsed:
+            html_parts.append(
+                f'<tr><td colspan="3" style="color:{HDR}; font-size:9pt; padding:2px 0 3px 0;">'
+                f'有效检测</td></tr>')
+            html_parts.append(row('网球', len(v_balls),   ball_icon,   ball_color,   _tids(v_balls)))
+            html_parts.append(row('球员', len(v_persons), person_icon, person_color, _tids(v_persons)))
+            html_parts.append(row('球拍', len(v_rackets), racket_icon, racket_color, _tids(v_rackets)))
+            html_parts.append(sep)
+            html_parts.append(
+                f'<tr><td colspan="3" style="color:{HDR}; font-size:9pt; padding:2px 0 3px 0;">'
+                f'无效检测</td></tr>')
+            html_parts.append(inv_row('网球', len(inv_balls)))
+            html_parts.append(inv_row('球员', len(inv_persons)))
+            html_parts.append(inv_row('球拍', len(inv_rackets)))
+        else:
+            html_parts.append(
+                f'<tr><td colspan="3" style="color:{HDR}; font-size:9pt; padding:2px 0 3px 0;">'
+                f'检测</td></tr>')
+            html_parts.append(row('网球', len(v_balls),   '', '#aaaaaa', _tids(v_balls)))
+            html_parts.append(row('球员', len(v_persons), '', '#aaaaaa', _tids(v_persons)))
+            html_parts.append(row('球拍', len(v_rackets), '', '#aaaaaa', _tids(v_rackets)))
+
+        html_parts.append('</table></body></html>')
+        self.info_browser.setHtml(''.join(html_parts))
+
     # ── 键盘 / 窗口事件 ───────────────────────────────────────────────────────
 
     def keyPressEvent(self, event):
@@ -1012,8 +1119,8 @@ def main():
             "  python browse.py -v match.mp4 -j detections.json\n"
         ),
     )
-    parser.add_argument("-v", "--video", required=True, metavar="VIDEO",
-                        help="input video file")
+    parser.add_argument("-v", "--video", default=None, metavar="VIDEO",
+                        help="input video file（默认：从 JSON 的 video 字段读取）")
     parser.add_argument("-j", "--json",  required=True, metavar="JSON",
                         help="annotation JSON (COCO format)")
     if len(sys.argv) == 1:
@@ -1021,17 +1128,25 @@ def main():
         sys.exit(0)
     args = parser.parse_args()
 
-    video_path = Path(args.video).resolve()
-    json_path  = Path(args.json).resolve()
-
-    if not video_path.exists():
-        print(f"错误: 视频文件不存在: {video_path}", file=sys.stderr)
-        sys.exit(1)
+    json_path = Path(args.json).resolve()
     if not json_path.exists():
         print(f"错误: JSON 文件不存在: {json_path}", file=sys.stderr)
         sys.exit(1)
 
-    frame_anns, categories, court = load_annotations(json_path)
+    frame_anns, categories, court, video_from_json = load_annotations(json_path)
+
+    if args.video:
+        video_path = Path(args.video).resolve()
+    elif video_from_json:
+        video_path = video_from_json
+    else:
+        print("错误: 未指定 -v，且 JSON 中未包含 video 字段", file=sys.stderr)
+        sys.exit(1)
+
+    if not video_path.exists():
+        print(f"错误: 视频文件不存在: {video_path}", file=sys.stderr)
+        sys.exit(1)
+
     total_anns = sum(len(v) for v in frame_anns.values())
     print(f"已加载: {len(frame_anns)} 帧有标注，共 {total_anns} 个标注，{len(categories)} 个类别"
           + ("，含球场数据" if court else ""))

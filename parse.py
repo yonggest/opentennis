@@ -23,11 +23,18 @@ from utils import load_detections, save_coco, propagate_video
 
 
 _STATIC_BBOX_DIAG_PX = 20.0  # 静止球判定阈值：轨迹全局包围盒对角线（像素）
+_STOPPED_TIMEOUT_S   = 3.0   # 运动球停止后多久开始标记无效（秒）
+_STOPPED_MOVE_PX     = 15.0  # 判定"仍在移动"的最小位移（像素）
 
 
 
 def _in_hull(hull, x, y):
     return cv2.pointPolygonTest(hull, (float(x), float(y)), False) >= 0
+
+
+def _bboxes_overlap(a, b):
+    """两个 [x1,y1,x2,y2] bbox 是否有交叠。"""
+    return a[0] < b[2] and a[2] > b[0] and a[1] < b[3] and a[3] > b[1]
 
 
 def _bbox_overlaps_hull(hull, x1, y1, x2, y2):
@@ -52,13 +59,19 @@ def _filter_players(players, ground_hull):
     return kept, removed
 
 
-def _filter_rackets(rackets, volume_hull):
-    """返回 (kept, removed)，bbox 与缓冲区立方体凸包有重叠为有效球拍。"""
+def _filter_rackets(rackets, volume_hull, valid_players):
+    """返回 (kept, removed)。
+    有效条件（两者同时满足）：
+    1. bbox 与立方体缓冲区（volume hull）有交叠；
+    2. bbox 与当前帧至少一个有效球员的 bbox 有交叠。
+    """
     kept, removed = [], []
-    for frame in rackets:
+    for frame, players in zip(rackets, valid_players):
         k, r = [], []
         for d in frame:
-            (k if _bbox_overlaps_hull(volume_hull, *d['bbox']) else r).append(d)
+            in_volume = _bbox_overlaps_hull(volume_hull, *d['bbox'])
+            has_player = any(_bboxes_overlap(d['bbox'], p['bbox']) for p in players)
+            (k if in_volume and has_player else r).append(d)
         kept.append(k)
         removed.append(r)
     return kept, removed
@@ -93,46 +106,80 @@ def _make_wall_quads(vol_bottom_pts, vol_top_pts, img_height):
     return left_q, right_q
 
 
-def _filter_balls(balls, left_wall_q, right_wall_q, volume_hull):
+def _find_stop_frame(pts, timeout_frames, move_px):
+    """在运动轨迹中找到球"永久停止"的帧号。
+
+    pts       : [(frame_idx, cx, cy), ...]，按帧号升序排列
+    返回第一个在后续 timeout_frames 内位移均 < move_px 的帧号；
+    若整条轨迹始终在运动则返回 None。
+    """
+    n          = len(pts)
+    frame_idxs = [p[0] for p in pts]
+    for i in range(n):
+        fi0       = frame_idxs[i]
+        cx0, cy0  = pts[i][1], pts[i][2]
+        # 收集 timeout 窗口内的所有点
+        window = [k for k in range(i, n) if frame_idxs[k] - fi0 <= timeout_frames]
+        if len(window) < 2:
+            break  # 轨迹末尾，数据不足，不判定
+        moved = any(
+            np.hypot(pts[k][1] - cx0, pts[k][2] - cy0) >= move_px
+            for k in window
+        )
+        if not moved:
+            return fi0
+    return None
+
+
+def _filter_balls(balls, left_wall_q, right_wall_q, volume_hull, fps=25.0):
     """
     返回 (kept, removed)。
-    静止球（轨迹全局包围盒对角线 < _STATIC_BBOX_DIAG_PX）必须落在立方体凸包内；
-    运动球起点落在左墙或右墙四边形内（出界）→ 整条轨迹无效。
+
+    静止轨迹（全局包围盒对角线 < _STATIC_BBOX_DIAG_PX）→ 整条轨迹无效（场地噪点/假阳性）。
+    运动球起点在侧墙外 → 整条轨迹无效（场外球）。
+    运动球在停止后超过 _STOPPED_TIMEOUT_S 秒 → 停止帧之后的检测无效（遗留球）。
 
     track_id 处理：
-    - 若输入来自 track.py（有任意非 None 的 track_id）：track_id=None 的检测直接移除。
-    - 若输入来自 detect.py（所有 track_id 均为 None）：按静止球处理（兼容跳过 track 的用法）。
+    - 来自 track.py：track_id=None 的检测直接移除。
+    - 来自 detect.py（所有 track_id 均为 None）：按位置过滤（兼容跳过 track 的用法）。
     """
-    # 判断是否来自 track 阶段
     has_tracked = any(d.get('track_id') is not None
                       for frame in balls for d in frame)
 
+    # 收集每条轨迹的 (frame_idx, cx, cy)
     track_pts = defaultdict(list)
-    for frame in balls:
+    for fi, frame in enumerate(balls):
         for d in frame:
             tid = d.get('track_id')
             if tid is not None:
                 cx = (d['bbox'][0] + d['bbox'][2]) / 2
                 cy = (d['bbox'][1] + d['bbox'][3]) / 2
-                track_pts[tid].append((cx, cy))
+                track_pts[tid].append((fi, cx, cy))
 
-    static_tracks  = set()
-    invalid_tracks = set()
+    timeout_frames = max(1, int(fps * _STOPPED_TIMEOUT_S))
+
+    invalid_tracks = set()            # 整条轨迹无效
+    stopped_frames: dict = {}         # tid → 停止帧号（之后的检测无效）
+
     for tid, pts in track_pts.items():
         if len(pts) < 2:
-            static_tracks.add(tid)
+            invalid_tracks.add(tid)
             continue
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
+        xs = [p[1] for p in pts]
+        ys = [p[2] for p in pts]
         bbox_diag = np.hypot(max(xs) - min(xs), max(ys) - min(ys))
         if bbox_diag < _STATIC_BBOX_DIAG_PX:
-            static_tracks.add(tid)
-        elif (_in_hull(left_wall_q,  pts[0][0], pts[0][1]) or
-              _in_hull(right_wall_q, pts[0][0], pts[0][1])):
-            invalid_tracks.add(tid)
+            invalid_tracks.add(tid)                          # 始终静止：噪点
+        elif (_in_hull(left_wall_q, pts[0][1], pts[0][2]) or
+              _in_hull(right_wall_q, pts[0][1], pts[0][2])):
+            invalid_tracks.add(tid)                          # 起点在侧墙外
+        else:
+            stop_fi = _find_stop_frame(pts, timeout_frames, _STOPPED_MOVE_PX)
+            if stop_fi is not None:
+                stopped_frames[tid] = stop_fi                # 曾运动后停止
 
     kept, removed = [], []
-    for frame in balls:
+    for fi, frame in enumerate(balls):
         k, r = [], []
         for d in frame:
             tid = d.get('track_id')
@@ -141,13 +188,12 @@ def _filter_balls(balls, left_wall_q, right_wall_q, volume_hull):
             if tid in invalid_tracks:
                 r.append(d)
             elif tid is None:
-                # track 阶段已明确拒绝的检测 → 直接移除；未经 track 阶段则按静止球处理
                 if has_tracked:
                     r.append(d)
                 else:
                     (k if _in_hull(volume_hull, cx, cy) else r).append(d)
-            elif tid in static_tracks:
-                (k if _in_hull(volume_hull, cx, cy) else r).append(d)
+            elif tid in stopped_frames and fi >= stopped_frames[tid]:
+                r.append(d)                                  # 遗留球：停止超时
             else:
                 k.append(d)
         kept.append(k)
@@ -191,8 +237,8 @@ def main():
     n_rackets_before = sum(len(f) for f in rackets)
     n_balls_before   = sum(len(f) for f in balls)
     players, players_inv = _filter_players(players, ground_hull)
-    rackets, rackets_inv = _filter_rackets(rackets, volume_hull)
-    balls,   balls_inv   = _filter_balls(balls, left_wall_q, right_wall_q, volume_hull)
+    rackets, rackets_inv = _filter_rackets(rackets, volume_hull, players)
+    balls,   balls_inv   = _filter_balls(balls, left_wall_q, right_wall_q, volume_hull, fps=fps)
     print(f"[  filter] players: {n_players_before} → {sum(len(f) for f in players)}")
     print(f"[  filter] rackets: {n_rackets_before} → {sum(len(f) for f in rackets)}")
     print(f"[  filter] balls:   {n_balls_before} → {sum(len(f) for f in balls)}")
