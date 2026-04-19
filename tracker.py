@@ -403,7 +403,7 @@ class BallTracker:
     def __init__(self, min_hits=3, max_age=5,
                  conf_high=0.5, conf_low=0.1,
                  search_diameters=_SEARCH_DIAMETERS, max_dist=None,
-                 min_area=20.0, max_area=8000.0, min_aspect=0.4):
+                 min_area=20.0, max_area=8000.0, min_aspect=0.3):
         self._tracker   = Tracker(min_hits=min_hits, max_age=max_age,
                                   conf_high=conf_high, conf_low=conf_low,
                                   search_diameters=search_diameters,
@@ -415,7 +415,7 @@ class BallTracker:
     @classmethod
     def from_video(cls, fps: float, px_per_meter: float,
                    conf_high: float = 0.5, conf_low: float = 0.1,
-                   min_aspect: float = 0.4,
+                   min_aspect: float = 0.3,
                    search_diameters: float = _SEARCH_DIAMETERS):
         """
         根据帧率和像素/米比例推算各参数。
