@@ -217,6 +217,12 @@ def _match(tracks, dets, max_dist, min_iou=None, anchor_fn=None,
     hist_gate        → 直方图交叉距离上限，超出则硬拒绝；None 关闭
 
     返回 (matched[(ti,di)], unmatched_tracks[ti], unmatched_dets[di])
+
+    注意：距离门限在构建代价矩阵时即硬拒绝（cost 保持 1e9），而非仅在匈牙利分配后
+    再过滤。若门限在分配后才检查，匈牙利全局最优化会把大门限轨迹分配给本属于小门限
+    轨迹的检测（整体总代价更小），导致小门限轨迹被迫与远处噪点匹配或失配。
+    例：ball tracker 的 track A 门限 30px、track B 门限 500px，当某检测距 A 18px、
+    距 B 257px 时，匈牙利会把它分配给 B（腾出更近的检测给其他轨迹），A 反而失配。
     """
     if anchor_fn is None:
         anchor_fn = _center_det
@@ -247,6 +253,8 @@ def _match(tracks, dets, max_dist, min_iou=None, anchor_fn=None,
 
                 dcx, dcy = anchor_fn(d)
                 dist = ((tcx - dcx)**2 + (tcy - dcy)**2) ** 0.5
+                if dist > gates[i]:
+                    continue        # 超出距离门限，硬拒绝，不参与全局分配
                 # 颜色代价调制
                 cost[i, j] = dist * (1.0 + hist_weight * hd)
         valid = lambda r, v: v <= gates[r]
