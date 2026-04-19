@@ -190,9 +190,9 @@ class BrowseApp(QMainWindow):
             for ann in anns
             if ann.get("category_id") in self.ball_cids
         )
-        # parse.py 之后的 JSON 标注含 valid 字段；有 valid 说明已过滤，不应再显示搜索圆
+        # parse.py 之后的 JSON 会出现 valid=False 的标注；有 False 说明已过滤，不显示搜索圆
         self._has_parsed: bool = any(
-            "valid" in ann
+            ann.get("valid") is False
             for anns in frame_anns.values()
             for ann in anns
         )
