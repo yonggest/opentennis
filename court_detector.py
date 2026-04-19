@@ -105,7 +105,7 @@ class CourtDetector:
 
         # YOLO seg 模型（球场区域检测）
         self._seg_model = None
-        seg_path = seg_model or str(Path(__file__).parent / 'models/court_seg.pt')
+        seg_path = seg_model or str(Path(__file__).parent / 'models/yolo26n-seg-tuned.pt')
         if Path(seg_path).exists():
             from ultralytics import YOLO
             self._seg_model = YOLO(seg_path, verbose=False)
@@ -164,7 +164,7 @@ class CourtDetector:
         两阶段球场检测流程：
 
         步骤1  YOLO seg 初始化
-               用 court_seg 模型分割球场区域，提取四边形四角，
+               用 yolo26n-seg-tuned 模型分割球场区域，提取四边形四角，
                getPerspectiveTransform → 粗略初始单应矩阵 H_init。
                YOLO seg 结果仅用于初始 H 估计。
 
