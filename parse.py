@@ -46,14 +46,42 @@ def _bbox_overlaps_hull(hull, x1, y1, x2, y2):
     return False
 
 
-def _filter_players(players, ground_hull):
-    """返回 (kept, removed)，底部中心在地面缓冲区内为有效球员。"""
+def _filter_players(players, left_player_wall, right_player_wall, ground_hull):
+    """返回 (kept, removed)。
+    按 track_id 分组，同时满足以下两个条件才认为是球员：
+    1. 轨迹大部分（>50%）底部中心在 ground_hull（含缓冲区球场范围）内
+    2. 轨迹大部分不落在双打侧线外（左墙 + 右墙合计 <= 50%）
+    """
+    track_stats = defaultdict(lambda: {'total': 0, 'in_ground': 0, 'out_side': 0})
+
+    for frame in players:
+        for d in frame:
+            tid = d.get('track_id')
+            if tid is None:
+                continue
+            cx = (d['bbox'][0] + d['bbox'][2]) / 2
+            cy = d['bbox'][3]
+            s = track_stats[tid]
+            s['total'] += 1
+            if _in_hull(ground_hull, cx, cy):
+                s['in_ground'] += 1
+            if _in_hull(left_player_wall, cx, cy) or _in_hull(right_player_wall, cx, cy):
+                s['out_side'] += 1
+
+    invalid_tracks = set()
+    for tid, s in track_stats.items():
+        total = s['total']
+        majority_in_ground = s['in_ground'] / total > 0.5
+        majority_out_side  = s['out_side']  / total > 0.5
+        if not majority_in_ground or majority_out_side:
+            invalid_tracks.add(tid)
+
     kept, removed = [], []
     for frame in players:
         k, r = [], []
         for d in frame:
-            cx = (d['bbox'][0] + d['bbox'][2]) / 2
-            (k if _in_hull(ground_hull, cx, d['bbox'][3]) else r).append(d)
+            tid = d.get('track_id')
+            (r if tid in invalid_tracks else k).append(d)
         kept.append(k)
         removed.append(r)
     return kept, removed
@@ -232,11 +260,13 @@ def main():
     volume_hull = court['volume_hull']
     left_wall_q, right_wall_q = _make_wall_quads(
         court['vol_bottom_pts'], court['vol_top_pts'], height)
+    left_player_wall, right_player_wall = _make_wall_quads(
+        court['court_bottom_pts'], court['court_top_pts'], height)
 
     n_players_before = sum(len(f) for f in players)
     n_rackets_before = sum(len(f) for f in rackets)
     n_balls_before   = sum(len(f) for f in balls)
-    players, players_inv = _filter_players(players, ground_hull)
+    players, players_inv = _filter_players(players, left_player_wall, right_player_wall, ground_hull)
     rackets, rackets_inv = _filter_rackets(rackets, volume_hull, players)
     balls,   balls_inv   = _filter_balls(balls, left_wall_q, right_wall_q, volume_hull, fps=fps)
     print(f"[  filter] players: {n_players_before} → {sum(len(f) for f in players)}")

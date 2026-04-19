@@ -161,42 +161,31 @@ class CourtDetector:
     # ── 2. 主入口 ──────────────────────────────────────────────────
     def predict(self, frame):
         """
-        三阶段球场检测流程：
+        两阶段球场检测流程：
 
         步骤1  YOLO seg 初始化
                用 court_seg 模型分割球场区域，提取四边形四角，
                getPerspectiveTransform → 粗略初始单应矩阵 H_init。
+               YOLO seg 结果仅用于初始 H 估计。
 
-        步骤2  粗 dist_map + Nelder-Mead 精调
-               用 YOLO seg 多边形膨胀 mask（_get_court_mask）限定白线检测范围，
-               对范围内的白线像素做距离变换得到 dist_map。
+        步骤2  全帧 dist_map + Nelder-Mead 精调
+               对整帧做白顶帽变换检测白线像素，构建 dist_map。
+               不依赖 YOLO mask，对各类场景均适用。
                以 dist_map 为目标，Nelder-Mead 精调 4 个角点坐标 → H_opt。
-               此阶段 mask 范围较宽松（含场外余量），dist_map 可能含
-               场地表面的假白点，但足以把 H 拉到正确区域。
-
-        步骤3  精 dist_map + 再次精调
-               用步骤2的 H_opt 把球场线条反投影回图像，得到仅覆盖
-               实际白线附近的带状 line_mask，重建更精确的 dist_map2。
-               再次 Nelder-Mead 从 H_opt 出发做精调 → H_opt2。
-               line_mask 排除了大面积场地表面的假白点，代价函数
-               梯度更锐利，优化结果更准确。
         """
-        # 步骤1：YOLO seg 粗略初始化
-        court_mask = self._get_court_mask(frame)
-        dist_map   = self._build_dist_map(frame, court_mask)
+        # 步骤1：YOLO seg 仅用于初始 H 估计
+        full_mask = np.ones(frame.shape[:2], dtype=np.uint8) * 255
+        dist_map  = self._build_dist_map(frame, full_mask)
         H_init, c_init = self._yolo_seg_init(frame, dist_map)
         print(f"[   court] YOLO seg init:   cost={c_init:.3f}")
+        if H_init is None:
+            raise RuntimeError("YOLO seg: no court detected (cannot initialize H)")
 
-        # 步骤2：粗 dist_map 下的 Nelder-Mead 精调
+        # 步骤2：全帧 dist_map + Nelder-Mead 精调
         H_opt = self._optimize(H_init, dist_map, frame.shape)
 
-        # 步骤3：用 H_opt 重建精 dist_map，再次精调
-        line_mask = self._build_line_mask(H_opt, frame.shape)
-        dist_map2 = self._build_dist_map(frame, line_mask)
-        H_opt2    = self._optimize(H_opt, dist_map2, frame.shape)
-
-        self._last_H = H_opt2
-        kps = self._project_keypoints(H_opt2)
+        self._last_H = H_opt
+        kps = self._project_keypoints(H_opt)
         return kps.flatten()
 
     # ── 3. 球场 mask ────────────────────────────────────────────────
@@ -262,8 +251,8 @@ class CourtDetector:
             thickness = max(1, round(lw_m * ppm))
             cv2.line(mask, tuple(proj[0]), tuple(proj[1]), 255, thickness)
 
-        # 膨胀：扩展 LINE_W（5 cm）对应的像素距离
-        r  = max(1, round(LINE_W * ppm))
+        # 膨胀：扩展 10 cm 对应的像素距离（约 2 倍线宽，增大容差带）
+        r  = max(1, round(0.10 * ppm))
         ks = 2 * r + 1
         k  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ks, ks))
         return cv2.dilate(mask, k)
@@ -280,17 +269,53 @@ class CourtDetector:
           细粒度 mask 排除了大面积场地表面，dist_map 更干净，
           代价函数对 H 的偏移更敏感，优化收敛到更准确的结果。
 
-        白线判定：HSV 高亮度（V > 180）+ 低饱和度（S < 50）。
+        白线判定：形态学 White Top-Hat 变换（局部高光提取）。
+        在 court_mask 内，用 mask 外填充中位亮度后做开运算，
+        original - opening 得到比周围场地更亮的白线残差。
+        不依赖绝对亮度，日/夜场景均适用。
         cap 限制最大距离，防止远离线条的区域主导代价均值。
         """
         if cap is None:
             cap = frame.shape[0] * 0.046    # ~4.6% 图像高度
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        white    = cv2.inRange(hsv, np.array([0, 0, 180]), np.array([180, 50, 255]))
-        white_in = cv2.bitwise_and(white, court_mask)
+        white_in = self._detect_white_pixels(frame, court_mask)
         dist = cv2.distanceTransform(
                    cv2.bitwise_not(white_in), cv2.DIST_L2, 5)
         return np.minimum(dist, cap).astype(np.float32)
+
+    def _detect_white_pixels(self, frame, court_mask):
+        """
+        在 court_mask 范围内检测白线像素，返回二值 mask（uint8）。
+
+        使用白顶帽变换（White Top-Hat = 原图 - 形态学开运算）：
+        开运算用大核抹掉比核小的亮特征（白线），场地背景亮度保留；
+        相减后只剩"比局部背景更亮的细小特征"，即白线残差。
+        完全自适应，不依赖绝对亮度阈值，日/夜场景均适用。
+
+        步骤：
+        1. 灰度化；场外填充场内中位亮度，防止 mask 边界干扰形态学运算。
+        2. White Top-Hat（椭圆核，大小≈5%图像高度）。
+        3. 仅在 court_mask 内对 top-hat 值做 Otsu 阈值，取较高者（≥15）。
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # 场外填充 court 内中位亮度，避免 mask 边界产生虚假边缘
+        court_px  = gray[court_mask > 0]
+        median_v  = int(np.median(court_px)) if court_px.size else 128
+        filled    = np.full_like(gray, median_v)
+        filled[court_mask > 0] = gray[court_mask > 0]
+
+        # White Top-Hat：核大于线宽、小于场地区块间距
+        ksize  = max(31, int(frame.shape[0] * 0.05))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
+        tophat = cv2.morphologyEx(filled, cv2.MORPH_TOPHAT, kernel)
+
+        # 在 court_mask 内用 Otsu 确定阈值（至少 15，防止全零分布误判）
+        vals = tophat[court_mask > 0].reshape(1, -1)
+        otsu_val, _ = cv2.threshold(vals, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        thresh   = max(15, int(otsu_val))
+        white    = (tophat > thresh).astype(np.uint8) * 255
+        white_in = cv2.bitwise_and(white, court_mask)
+        return white_in
 
     # ── 6. 代价函数：模板白线像素到实际边缘的平均距离 ─────────────
     def _compute_weights(self, H):
@@ -376,16 +401,16 @@ class CourtDetector:
                           [0,       COURT_L],
                           [COURT_W, COURT_L]], dtype=np.float32)
 
-        def corners_to_H(params):
-            dst = np.array(params, dtype=np.float32).reshape(4, 2)
-            H, _ = cv2.findHomography(SRC_M, dst, method=0)
-            return H
-
         if H_hint is None:
             raise RuntimeError("所有初始化方法均失败，无法检测球场")
 
         # 权重固定在优化开始前计算（用 H_hint），整个过程不变
         weights = self._compute_weights(H_hint)
+
+        def corners_to_H(params):
+            dst = np.array(params, dtype=np.float32).reshape(4, 2)
+            H, _ = cv2.findHomography(SRC_M, dst, method=0)
+            return H
 
         def corners_cost(params):
             """4-角参数化代价（含拓扑约束）"""

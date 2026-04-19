@@ -15,7 +15,7 @@ from ultralytics import YOLO
 
 # 每类独立 NMS IoU 阈值
 _NMS_IOU_PERSON  = 0.45   # 体型稳定，标准值
-_NMS_IOU_RACKET  = 0.35   # 形变大，宁可少保留
+_NMS_IOU_RACKET  = 0.25   # 形变大，宁可少保留
 _NMS_IOU_BALL    = 0.65   # 目标小，避免误删
 
 

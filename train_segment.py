@@ -41,7 +41,7 @@ def main():
     print(f"  lr0            {args.lr0}")
     print(f"  lrf            0.1")
     print(f"  optimizer      AdamW")
-    print(f"  freeze         9")
+    print(f"  freeze         0")
     print(f"  warmup_epochs  1")
     print(f"  patience       20")
     print(f"  save_period    5")
@@ -49,7 +49,7 @@ def main():
     print(f"  plots          False")
     print(f"  cache          False")
     print(f"  augmentation   hsv_h=0  hsv_s=0.5  hsv_v=0.4  degrees=0")
-    print(f"                 translate=0.1  scale=0  fliplr=0.5")
+    print(f"                 translate=0.0  scale=0  fliplr=0.0")
     print(f"                 mosaic=0  mixup=0  copy_paste=0")
     print("─" * 60, flush=True)
 
@@ -69,7 +69,7 @@ def main():
         batch=1,
         lr0=args.lr0,
         imgsz=640,
-        freeze=9,            # 冻结 backbone（0–8），训练 neck + head
+        freeze=0,            # 不冻结，全量微调
         lrf=0.1,             # 最终学习率 = lr0 * lrf
         warmup_epochs=1,
         patience=20,
@@ -88,8 +88,8 @@ def main():
         hsv_s=0.5,
         hsv_v=0.4,
         degrees=0.0,
-        translate=0.1,
-        fliplr=0.5,
+        translate=0.0,
+        fliplr=0.0,
         mosaic=0.0,
         scale=0.0,
         mixup=0.0,

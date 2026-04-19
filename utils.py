@@ -69,7 +69,7 @@ def open_video_writer(path, fps, width, height):
 #   annotations  : [{id, image_id, category_id, bbox [x,y,w,h], area, iscrowd, score}, ...]
 #   categories   : [{id, name, supercategory}, ...]
 #   fps          : float
-#   court        : {keypoints, ground_hull, volume_hull, vol_bottom_pts, vol_top_pts}  （可选）
+#   court        : {keypoints, ground_hull, volume_hull, vol_bottom_pts, vol_top_pts, court_bottom_pts, court_top_pts}  （可选）
 
 _CATEGORIES = [
     {'id': 1, 'name': 'person',        'supercategory': 'person'},
@@ -82,22 +82,26 @@ _CAT_ID = {'person': 1, 'tennis racket': 2, 'sports ball': 3}
 def _serialize_court(court):
     """将 court dict 的 numpy 数组序列化为 JSON 可写格式。"""
     return {
-        'keypoints':      np.array(court['keypoints']).reshape(14, 2).tolist(),
-        'ground_hull':    np.array(court['ground_hull']).reshape(-1, 2).tolist(),
-        'volume_hull':    np.array(court['volume_hull']).reshape(-1, 2).tolist(),
-        'vol_bottom_pts': np.array(court['vol_bottom_pts']).tolist(),
-        'vol_top_pts':    np.array(court['vol_top_pts']).tolist(),
+        'keypoints':        np.array(court['keypoints']).reshape(14, 2).tolist(),
+        'ground_hull':      np.array(court['ground_hull']).reshape(-1, 2).tolist(),
+        'volume_hull':      np.array(court['volume_hull']).reshape(-1, 2).tolist(),
+        'vol_bottom_pts':   np.array(court['vol_bottom_pts']).tolist(),
+        'vol_top_pts':      np.array(court['vol_top_pts']).tolist(),
+        'court_bottom_pts': np.array(court['court_bottom_pts']).tolist(),
+        'court_top_pts':    np.array(court['court_top_pts']).tolist(),
     }
 
 
 def _deserialize_court(raw):
     """将 JSON 中的 court dict 恢复为 numpy 数组。"""
     return {
-        'keypoints':      np.array(raw.get('keypoints',      [[0,0]]*14), dtype=np.float32).flatten(),
-        'ground_hull':    np.array(raw.get('ground_hull',    [[0,0]]*4),  dtype=np.float32).reshape(-1, 1, 2),
-        'volume_hull':    np.array(raw.get('volume_hull',    [[0,0]]*4),  dtype=np.float32).reshape(-1, 1, 2),
-        'vol_bottom_pts': np.array(raw.get('vol_bottom_pts', [[0,0]]*4), dtype=np.float32),
-        'vol_top_pts':    np.array(raw.get('vol_top_pts',    [[0,0]]*4), dtype=np.float32),
+        'keypoints':        np.array(raw['keypoints'],        dtype=np.float32).flatten(),
+        'ground_hull':      np.array(raw['ground_hull'],      dtype=np.float32).reshape(-1, 1, 2),
+        'volume_hull':      np.array(raw['volume_hull'],      dtype=np.float32).reshape(-1, 1, 2),
+        'vol_bottom_pts':   np.array(raw['vol_bottom_pts'],   dtype=np.float32),
+        'vol_top_pts':      np.array(raw['vol_top_pts'],      dtype=np.float32),
+        'court_bottom_pts': np.array(raw['court_bottom_pts'], dtype=np.float32),
+        'court_top_pts':    np.array(raw['court_top_pts'],    dtype=np.float32),
     }
 
 

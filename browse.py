@@ -36,8 +36,9 @@ _PALETTE = [
     ("#aa44ff", "#4a1e6e"),
     ("#33cccc", "#1e5c5c"),
 ]
-_COURT_COLOR  = "#f0c040"
-_VOLUME_COLOR = "#00dcff"
+_COURT_COLOR    = "#f0c040"
+_VOLUME_COLOR   = "#00dcff"
+_SIDELINE_COLOR = "#00b400"   # 双打侧线墙（球员过滤边界）
 _LIST_W      = 80    # 左侧帧号列表宽度（像素）
 
 _BALL_TRAJ_COLORS = [
@@ -592,8 +593,9 @@ class BrowseApp(QMainWindow):
             self._render_court(font_size)
 
     def _render_court(self, font_size: int):
-        court_pen  = QPen(QColor(_COURT_COLOR),  1); court_pen.setCosmetic(True)
-        volume_pen = QPen(QColor(_VOLUME_COLOR), 1); volume_pen.setCosmetic(True)
+        court_pen    = QPen(QColor(_COURT_COLOR),    1); court_pen.setCosmetic(True)
+        volume_pen   = QPen(QColor(_VOLUME_COLOR),   1); volume_pen.setCosmetic(True)
+        sideline_pen = QPen(QColor(_SIDELINE_COLOR), 1); sideline_pen.setCosmetic(True)
 
         # 球场线条 + 网线 + 关键点
         keypoints = self.court.get("keypoints", [])
@@ -614,21 +616,30 @@ class BrowseApp(QMainWindow):
                 ).setZValue(0)
 
         # 地面缓冲区轮廓
-        ground_hull = self.court.get("ground_hull", [])
-        if len(ground_hull) >= 2:
-            poly = QPolygonF([QPointF(p[0], p[1]) for p in ground_hull])
-            self.scene.addPolygon(poly, court_pen, QBrush(Qt.NoBrush)).setZValue(0)
+        ground_hull = self.court["ground_hull"]
+        poly = QPolygonF([QPointF(p[0], p[1]) for p in ground_hull])
+        self.scene.addPolygon(poly, court_pen, QBrush(Qt.NoBrush)).setZValue(0)
+
+        # 双打侧线立方体（球员过滤边界）：遮罩 + 线框，与缓冲区显示方式一致
+        # 先画内墙，再画外墙，遮罩从内到外叠加
+        c_bot = self.court["court_bottom_pts"]
+        c_top = self.court["court_top_pts"]
+        self._render_outside_masks(c_bot, c_top)
+        for i in range(4):
+            j = (i + 1) % 4
+            self.scene.addLine(c_bot[i][0], c_bot[i][1], c_bot[j][0], c_bot[j][1], sideline_pen).setZValue(1)
+            self.scene.addLine(c_top[i][0], c_top[i][1], c_top[j][0], c_top[j][1], sideline_pen).setZValue(1)
+            self.scene.addLine(c_bot[i][0], c_bot[i][1], c_top[i][0], c_top[i][1], sideline_pen).setZValue(1)
 
         # 缓冲区立方体线框 + 侧边外部遮罩
-        vol_bot = self.court.get("vol_bottom_pts", [])
-        vol_top = self.court.get("vol_top_pts", [])
-        if len(vol_bot) == 4 and len(vol_top) == 4:
-            self._render_outside_masks(vol_bot, vol_top)
-            for i in range(4):
-                j = (i + 1) % 4
-                self.scene.addLine(vol_bot[i][0], vol_bot[i][1], vol_bot[j][0], vol_bot[j][1], volume_pen).setZValue(1)
-                self.scene.addLine(vol_top[i][0], vol_top[i][1], vol_top[j][0], vol_top[j][1], volume_pen).setZValue(1)
-                self.scene.addLine(vol_bot[i][0], vol_bot[i][1], vol_top[i][0], vol_top[i][1], volume_pen).setZValue(1)
+        vol_bot = self.court["vol_bottom_pts"]
+        vol_top = self.court["vol_top_pts"]
+        self._render_outside_masks(vol_bot, vol_top)
+        for i in range(4):
+            j = (i + 1) % 4
+            self.scene.addLine(vol_bot[i][0], vol_bot[i][1], vol_bot[j][0], vol_bot[j][1], volume_pen).setZValue(1)
+            self.scene.addLine(vol_top[i][0], vol_top[i][1], vol_top[j][0], vol_top[j][1], volume_pen).setZValue(1)
+            self.scene.addLine(vol_bot[i][0], vol_bot[i][1], vol_top[i][0], vol_top[i][1], volume_pen).setZValue(1)
 
     def _render_outside_masks(self, vol_bot, vol_top):
         """在缓冲区侧边外部绘制半透明遮罩。

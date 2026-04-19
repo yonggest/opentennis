@@ -95,17 +95,20 @@ def main():
                   True, (0, 255, 255), 2)
     save(f"{out_dir}/1_court_mask.jpg", vis_mask, "球场颜色分割（场外变暗）")
 
-    # ── 步骤 2：球场内白色像素 ──────────────────────────────────────
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    white = cv2.inRange(hsv, np.array([0, 0, 180]), np.array([180, 50, 255]))
-    white_in = cv2.bitwise_and(white, court_mask)
+    # ── 步骤 2：全帧白色像素（顶帽，不依赖 YOLO mask）──────────────
+    full_mask = np.ones(frame.shape[:2], dtype=np.uint8) * 255
+    white_in = detector._detect_white_pixels(frame, full_mask)
 
     vis_white = frame.copy()
     vis_white[white_in > 0] = (0, 200, 255)   # 橙色标出白线像素
-    save(f"{out_dir}/2_white_pixels.jpg", vis_white, "球场内白色像素（橙色）")
+    n_white = int((white_in > 0).sum())
+    n_total = int(full_mask.size)
+    pct = 100 * n_white / n_total
+    print(f"  全帧白线像素: {n_white}/{n_total} = {pct:.1f}%")
+    save(f"{out_dir}/2_white_pixels.jpg", vis_white, "全帧白色像素（橙色）")
 
     # ── 步骤 3：距离场 ──────────────────────────────────────────────
-    dist_map = detector._build_dist_map(frame, court_mask)
+    dist_map = detector._build_dist_map(frame, full_mask)
     cap_val   = float(dist_map.max())
     dist_vis  = (dist_map / cap_val * 255).astype(np.uint8)
     dist_color = cv2.applyColorMap(dist_vis, cv2.COLORMAP_INFERNO)
@@ -152,31 +155,6 @@ def main():
         vis_tmpl[y, x] = (0, 255, 0)
     save(f"{out_dir}/6_template_proj.jpg", vis_tmpl, "模板白线像素投影（绿点）")
 
-    # ── 步骤 7：line_mask（步骤3用的更紧致 mask）──────────────────
-    line_mask = detector._build_line_mask(H_opt, frame.shape)
-    vis_lm = frame.copy()
-    vis_lm[line_mask == 0] = (vis_lm[line_mask == 0] * 0.35).astype(np.uint8)
-    save(f"{out_dir}/7_line_mask.jpg", vis_lm, "步骤3 line_mask（场外+线条间区域变暗）")
-
-    # ── 步骤 8：dist_map2（用 line_mask 重建的距离场）─────────────
-    dist_map2 = detector._build_dist_map(frame, line_mask)
-    cap_val2   = float(dist_map2.max())
-    dist_vis2  = (dist_map2 / cap_val2 * 255).astype(np.uint8)
-    dist_color2 = cv2.applyColorMap(dist_vis2, cv2.COLORMAP_INFERNO)
-    save(f"{out_dir}/8_dist_map2.jpg", dist_color2, "步骤3 dist_map2（line_mask 重建）")
-
-    # ── 步骤 9：步骤3再次优化后结果 ──────────────────────────────
-    H_opt2 = detector._optimize(H_opt, dist_map2, frame.shape)
-    c_opt2 = detector._cost(H_opt2, dist_map2)
-    print(f"  step3 optimized cost: {c_opt2:.3f}")
-
-    vis_opt2 = draw_court_lines(frame, H_opt2, color=(0, 255, 128), thickness=1)
-    kps2 = cv2.perspectiveTransform(MODEL_KPS_M.reshape(-1,1,2), H_opt2).reshape(-1,2).astype(int)
-    for pt in kps2:
-        cv2.circle(vis_opt2, tuple(pt), 4, (0, 255, 128), -1)
-    cv2.putText(vis_opt2, f"step3 cost={c_opt2:.3f}", (20, 50),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 128), 2)
-    save(f"{out_dir}/9_step3_optimized.jpg", vis_opt2, f"步骤3优化后 H（cost={c_opt2:.3f}）")
 
     # ── 步骤 10：ITF 标准缓冲区可视化 ────────────────────────────
     # 缓冲区：底线后 CLEARANCE_BACK m，侧线外 CLEARANCE_SIDE m
@@ -186,9 +164,9 @@ def main():
         [COURT_W + CLEARANCE_SIDE,  COURT_L + CLEARANCE_BACK],
         [-CLEARANCE_SIDE,           COURT_L + CLEARANCE_BACK],
     ], dtype=np.float32)
-    buf_px = cv2.perspectiveTransform(buf_m.reshape(-1, 1, 2), H_opt2).reshape(-1, 1, 2).astype(np.int32)
+    buf_px = cv2.perspectiveTransform(buf_m.reshape(-1, 1, 2), H_opt).reshape(-1, 1, 2).astype(np.int32)
 
-    vis_buf = draw_court_lines(frame, H_opt2, color=(0, 255, 128), thickness=1)
+    vis_buf = draw_court_lines(frame, H_opt, color=(0, 255, 128), thickness=1)
     # 缓冲区外变暗
     buf_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
     cv2.fillPoly(buf_mask, [buf_px], 255)
@@ -208,9 +186,9 @@ def main():
         [COURT_W + cb_side,  COURT_L + cb_back],
         [-cb_side,           COURT_L + cb_back],
     ], dtype=np.float32)
-    buf2_px = cv2.perspectiveTransform(buf2_m.reshape(-1, 1, 2), H_opt2).reshape(-1, 1, 2).astype(np.int32)
+    buf2_px = cv2.perspectiveTransform(buf2_m.reshape(-1, 1, 2), H_opt).reshape(-1, 1, 2).astype(np.int32)
 
-    vis_buf2 = draw_court_lines(frame, H_opt2, color=(0, 255, 128), thickness=1)
+    vis_buf2 = draw_court_lines(frame, H_opt, color=(0, 255, 128), thickness=1)
     buf2_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
     cv2.fillPoly(buf2_mask, [buf2_px], 255)
     vis_buf2[buf2_mask == 0] = (vis_buf2[buf2_mask == 0] * 0.35).astype(np.uint8)
@@ -221,31 +199,32 @@ def main():
          f"缩减缓冲区（后侧{cb_back}m，边线{cb_side}m）")
 
     # ── 步骤 12：缓冲区立方体凸包（两种尺寸对比）────────────────────
-    def draw_clearance_volume(frame, H_opt2, back, side, color, label):
-        detector._last_H = H_opt2
+    def draw_clearance_volume(frame, H_opt, back, side, color, label):
+        detector._last_H = H_opt
         hull, pts_bot, pts_top = detector.get_clearance_volume_hull(
             frame.shape, back=back, side=side, height=2.0)
-        vis = draw_court_lines(frame, H_opt2, color=(0, 255, 128), thickness=1)
+        vis = draw_court_lines(frame, H_opt, color=(0, 255, 128), thickness=1)
         # 凸包外变暗
         mask = np.zeros(frame.shape[:2], dtype=np.uint8)
-        cv2.fillPoly(mask, [hull], 255)
+        hull_i32 = hull.reshape(-1, 1, 2).astype(np.int32)
+        cv2.fillPoly(mask, [hull_i32], 255)
         vis[mask == 0] = (vis[mask == 0] * 0.35).astype(np.uint8)
         # 凸包轮廓
-        cv2.polylines(vis, [hull], True, color, 2)
+        cv2.polylines(vis, [hull_i32], True, color, 2)
         # 立方体线框
         draw_volume_wireframe(vis, pts_bot, pts_top, color)
         cv2.putText(vis, label, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 2)
         return vis
 
     vis_v1 = draw_clearance_volume(
-        frame, H_opt2,
+        frame, H_opt,
         back=CLEARANCE_BACK, side=CLEARANCE_SIDE,
         color=(0, 220, 255),
         label=f"ITF 标准: back={CLEARANCE_BACK}m side={CLEARANCE_SIDE}m h=2m")
     save(f"{out_dir}/12a_volume_itf.jpg", vis_v1, "ITF 缓冲区立方体凸包")
 
     vis_v2 = draw_clearance_volume(
-        frame, H_opt2,
+        frame, H_opt,
         back=5.5, side=3.0,
         color=(0, 140, 255),
         label="俱乐部: back=5.5m side=3.0m h=2m")

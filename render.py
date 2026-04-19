@@ -28,6 +28,7 @@ from court_detector import (COURT_LINES, COURT_W as _COURT_W, NET_Y as _NET_Y,
 # ── 绘制颜色（BGR）────────────────────────────────────────────────────────────
 _COLOR_COURT      = (80, 200, 255)   # 球场线 / 关键点
 _COLOR_VOLUME     = (0, 220, 255)    # 缓冲区立方体线框
+_COLOR_SIDELINE   = (0, 180, 0)      # 双打侧线立方体线框（球员过滤边界）
 _COLOR_PLAYER     = (0, 255, 0)      # 有效球员
 _COLOR_RACKET     = (255, 165, 0)    # 有效球拍
 _COLOR_BALL_NONE  = (128, 128, 128)  # 无 track_id 的球
@@ -221,6 +222,7 @@ def _draw_volume_wireframe(frame, pts_bot, pts_top, color):
         cv2.line(frame, tuple(pts_b[i]), tuple(pts_t[i]), color, 1)
 
 
+
 def _draw_skeleton(frame, keypoints, thick):
     """绘制 COCO 17 关键点骨架。"""
     for (i, j) in _SKELETON:
@@ -238,11 +240,14 @@ def _draw_skeleton(frame, keypoints, thick):
 
 
 def _draw_frame(frame, fi, court_kps, H, pts_vol_bot, pts_vol_top,
+                pts_court_bot, pts_court_top,
                 players, rackets, balls, ball_traj, player_traj, racket_traj,
                 players_inv, rackets_inv, balls_inv,
                 scale, thick, scale_large, thick_large, margin):
     """原地修改单帧：绘制球场轮廓、缓冲区立方体、检测框、球/球员/球拍轨迹、帧号。"""
     _draw_court_kps(frame, court_kps, H)
+    _draw_outside_masks(frame, pts_court_bot, pts_court_top)
+    _draw_volume_wireframe(frame, pts_court_bot, pts_court_top, _COLOR_SIDELINE)
     _draw_outside_masks(frame, pts_vol_bot, pts_vol_top)
     _draw_volume_wireframe(frame, pts_vol_bot, pts_vol_top, _COLOR_VOLUME)
 
@@ -344,10 +349,12 @@ def main():
     fps, width, height, court, players_raw, rackets_raw, balls_raw = \
         load_detections(args.json)
 
-    court_kps   = court['keypoints']
-    pts_vol_bot = court['vol_bottom_pts']
-    pts_vol_top = court['vol_top_pts']
-    H           = compute_H_from_kps(court_kps)
+    court_kps    = court['keypoints']
+    pts_vol_bot  = court['vol_bottom_pts']
+    pts_vol_top  = court['vol_top_pts']
+    pts_court_bot = np.array(court['court_bottom_pts'])
+    pts_court_top = np.array(court['court_top_pts'])
+    H            = compute_H_from_kps(court_kps)
 
     players     = [[d for d in f if     d['valid']] for f in players_raw]
     players_inv = [[d for d in f if not d['valid']] for f in players_raw]
@@ -373,6 +380,7 @@ def main():
     with open_video_writer(output_path, fps, width, height) as pipe:
         for fi, frame in enumerate(iter_frames(args.input)):
             _draw_frame(frame, fi, court_kps, H, pts_vol_bot, pts_vol_top,
+                        pts_court_bot, pts_court_top,
                         players, rackets, balls, ball_traj, player_traj, racket_traj,
                         players_inv, rackets_inv, balls_inv,
                         scale, thick, scale_large, thick_large, margin)

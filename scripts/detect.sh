@@ -30,7 +30,7 @@ if [[ "$(uname)" == "Darwin" ]]; then
 else
   OBJECT_MODEL="models/yolo26x.pt"
 fi
-COURT_MODEL="models/yolo26n-seg-tuned.pt"
+COURT_MODEL="models/yolo26x-seg-tuned.pt"
 CONF=0.1
 
 echo "════════════════════════════════════════════════════════════"
