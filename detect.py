@@ -52,7 +52,8 @@ def main():
     print(f"  court-model   {args.court_model}")
     print(f"  imgsz         {args.imgsz}")
     device = args.device or pick_free_gpu()
-    print(f"  device        {args.device or f'auto → {device or \"framework default\"}'}")
+    device_str = args.device or ('auto → ' + (device or 'framework default'))
+    print(f"  device        {device_str}")
     print("─" * 60, flush=True)
 
     fps, width, height, n_frames = video_info(args.input)
