@@ -14,7 +14,7 @@ import sys
 
 import cv2
 
-from utils import video_info, iter_frames, save_coco
+from utils import video_info, iter_frames, save_coco, pick_free_gpu
 from court_detector import (CourtDetector, compute_H_from_kps,
                              CLEARANCE_BACK, CLEARANCE_SIDE)
 from objects_detector import ObjectsDetector
@@ -51,7 +51,8 @@ def main():
     print(f"  object-model  {args.object_model}")
     print(f"  court-model   {args.court_model}")
     print(f"  imgsz         {args.imgsz}")
-    print(f"  device        {args.device or 'auto'}")
+    device = args.device or pick_free_gpu()
+    print(f"  device        {args.device or f'auto → {device or \"framework default\"}'}")
     print("─" * 60, flush=True)
 
     fps, width, height, n_frames = video_info(args.input)
@@ -84,7 +85,7 @@ def main():
     }
 
     # ── 物体检测（全部帧，全图推理）──────────────────────────────────────────
-    obj_detector = ObjectsDetector(args.object_model, imgsz=args.imgsz, device=args.device)
+    obj_detector = ObjectsDetector(args.object_model, imgsz=args.imgsz, device=device)
     players, rackets, balls = obj_detector.run(
         iter_frames(args.input),
         total=n_frames,

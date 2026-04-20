@@ -6,6 +6,23 @@ import subprocess
 import numpy as np
 
 
+def pick_free_gpu() -> str | None:
+    """返回空闲显存最多的 GPU 索引字符串；无 CUDA（如 macOS）时返回 None 让框架自动选。"""
+    try:
+        out = subprocess.check_output(
+            ['nvidia-smi', '--query-gpu=index,memory.free', '--format=csv,noheader,nounits'],
+            text=True,
+        )
+        best = max(
+            ((int(idx.strip()), int(free.strip())) for idx, free in
+             (line.split(',') for line in out.strip().splitlines())),
+            key=lambda x: x[1],
+        )
+        return str(best[0])
+    except Exception:
+        return None
+
+
 def text_params(frame_height, base_height=1080):
     """根据帧高度返回 (font_scale, thickness)，基准为 1080p。"""
     scale = frame_height / base_height

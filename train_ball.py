@@ -16,6 +16,8 @@ from pathlib import Path
 from datetime import datetime
 from ultralytics import YOLO
 
+from utils import pick_free_gpu
+
 
 def parse_args():
     p = argparse.ArgumentParser(
@@ -42,7 +44,8 @@ def main():
     print(f"  imgsz      {args.imgsz}")
     print(f"  epochs     {args.epochs}")
     print(f"  lr0        {args.lr0}")
-    print(f"  device     {args.device or 'auto'}")
+    _gpu = pick_free_gpu() or 'framework default'
+    print(f"  device     {args.device or f'auto → {_gpu}'}")
     print(f"  freeze     0  (全网络训练)")
     print(f"  augment    hsv_s=0.2 hsv_v=0.3  translate=0.1")
     print(f"             mosaic=0  scale=0  fliplr=0  mixup=0")
@@ -52,6 +55,8 @@ def main():
         raise FileNotFoundError(f"找不到模型: {args.model}")
     if not Path(args.data).exists():
         raise FileNotFoundError(f"找不到 data.yaml: {args.data}")
+
+    device = args.device or pick_free_gpu()
 
     dataset_name = Path(args.data).parent.name
     run_name     = f"{dataset_name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
@@ -71,7 +76,7 @@ def main():
         save        = True,
         save_period = 10,
         cache       = True,         # patch 小，可全量缓存到内存
-        device      = args.device or None,
+        device      = device,
         project     = project_dir,
         name        = run_name,
         exist_ok    = False,
