@@ -21,6 +21,7 @@ def parse_args():
     p.add_argument("--data",    required=True,               help="数据集配置文件（如 datasets/xxx-seg/data.yaml）")
     p.add_argument("--lr0",     type=float, default=0.001,   help="初始学习率（微调时比默认小）")
     p.add_argument("--epochs",  type=int,   default=50,      help="训练轮数")
+    p.add_argument("--imgsz",   type=int,   default=640,     help="训练图片尺寸")
     p.add_argument("--device",  default="",                  help="'mps'/'cpu'/'0'(CUDA)，留空自动选择")
     if len(sys.argv) == 1:
         p.print_help()
@@ -37,7 +38,7 @@ def main():
     print(f"  device         {args.device or 'auto'}")
     print(f"  epochs         {args.epochs}")
     print(f"  batch          1")
-    print(f"  imgsz          640")
+    print(f"  imgsz          {args.imgsz}")
     print(f"  lr0            {args.lr0}")
     print(f"  lrf            0.1")
     print(f"  optimizer      AdamW")
@@ -68,7 +69,7 @@ def main():
         epochs=args.epochs,
         batch=1,
         lr0=args.lr0,
-        imgsz=640,
+        imgsz=args.imgsz,
         freeze=0,            # 不冻结，全量微调
         lrf=0.1,             # 最终学习率 = lr0 * lrf
         warmup_epochs=1,

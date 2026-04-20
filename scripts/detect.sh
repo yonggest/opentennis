@@ -31,12 +31,10 @@ else
   OBJECT_MODEL="models/yolo26x.pt"
 fi
 COURT_MODEL="models/yolo26n-seg-tuned.pt"
-CONF=0.1
 
 echo "════════════════════════════════════════════════════════════"
 echo "  object model  $OBJECT_MODEL"
 echo "  court model   $COURT_MODEL"
-echo "  conf          $CONF"
 echo "════════════════════════════════════════════════════════════"
 
 # ── 收集 (视频, 输出json) 列表 ────────────────────────────────────────────────
@@ -88,14 +86,13 @@ for i in "${!video_list[@]}"; do
   echo ""
   echo "── $video"
   echo "   → $out_json"
-  echo -e "   \033[1;32m$\033[0m \033[1;33m.venv/bin/python detect.py\033[0m -i \"$video\" -o \"$out_json\" -m \"$OBJECT_MODEL\" -s \"$COURT_MODEL\" -c $CONF"
+  echo -e "   \033[1;32m$\033[0m \033[1;33m.venv/bin/python detect.py\033[0m -i \"$video\" -o \"$out_json\" -m \"$OBJECT_MODEL\" -s \"$COURT_MODEL\""
 
   if .venv/bin/python detect.py \
       -i "$video" \
       -o "$out_json" \
       -m "$OBJECT_MODEL" \
-      -s "$COURT_MODEL" \
-      -c "$CONF"; then
+      -s "$COURT_MODEL"; then
     ok=$((ok + 1))
   else
     echo "  [FAILED] $video" >&2

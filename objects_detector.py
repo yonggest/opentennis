@@ -13,6 +13,11 @@ def _fmt(seconds):
     return f"{m}:{s:02d}"
 from ultralytics import YOLO
 
+# 每类独立置信度阈值（YOLO 推理使用最低值，各类在 _parse 中独立过滤）
+_CONF_PERSON = 0.50   # 体型大，低置信度可靠性差
+_CONF_RACKET = 0.25   # 目标较小，检测困难，放宽阈值
+_CONF_BALL   = 0.10   # 网球极小，保留低置信度候选
+
 # 每类独立 NMS IoU 阈值
 _NMS_IOU_PERSON  = 0.45   # 体型稳定，标准值
 _NMS_IOU_RACKET  = 0.25   # 形变大，宁可少保留
@@ -42,8 +47,7 @@ def _nms(dets, iou_thresh):
 class ObjectsDetector:
     """一次推断提取 person、tennis racket、sports ball 三类目标。"""
 
-    def __init__(self, model_path, conf=0.1, imgsz=960, device=None):
-        self.conf = conf
+    def __init__(self, model_path, imgsz=960, device=None):
         self.imgsz = imgsz
         self.device = device or self._auto_device(model_path)
         print(f"[  detect] loading model: {model_path}  device={self.device}", flush=True)
@@ -72,7 +76,7 @@ class ObjectsDetector:
         t0 = time.time()
 
         for i, frame in enumerate(frames):
-            results = self.model.predict(frame, conf=self.conf, imgsz=self.imgsz,
+            results = self.model.predict(frame, conf=_CONF_BALL, imgsz=self.imgsz,
                                          classes=self.class_ids, device=self.device,
                                          iou=1.0,
                                          verbose=False, save=False)[0]
@@ -101,11 +105,11 @@ class ObjectsDetector:
             cls_name = names[int(box.cls[0])]
             x1, y1, x2, y2 = box.xyxy.tolist()[0]
             det = {'bbox': [x1, y1, x2, y2], 'conf': float(box.conf[0]), 'track_id': None}
-            if cls_name == "person":
+            if cls_name == "person" and det['conf'] >= _CONF_PERSON:
                 players.append(det)
-            elif cls_name == "tennis racket":
+            elif cls_name == "tennis racket" and det['conf'] >= _CONF_RACKET:
                 rackets.append(det)
-            elif cls_name == "sports ball":
+            elif cls_name == "sports ball" and det['conf'] >= _CONF_BALL:
                 balls.append(det)
         players = _nms(players, _NMS_IOU_PERSON)
         rackets = _nms(rackets, _NMS_IOU_RACKET)

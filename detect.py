@@ -33,7 +33,6 @@ def parse_args():
     p.add_argument('-o', '--output',        default=None,                 help='输出 JSON 路径（默认：输入同名加 _detected）')
     p.add_argument('-m', '--object-model', default='models/yolo26x.pt',  help='物体检测模型路径（球员/球拍/球）')
     p.add_argument('-s', '--court-model',  default='models/yolo26n-seg-tuned.pt', help='球场分割模型路径')
-    p.add_argument('-c', '--conf',         type=float, default=0.5,      help='检测置信度阈值')
     p.add_argument('-z', '--imgsz',        type=int,   default=1920,     help='推理图片尺寸')
     p.add_argument('-d', '--device',       default=None,                  help='推理设备：cpu / cuda / mps（默认自动）')
     if len(sys.argv) == 1:
@@ -51,7 +50,7 @@ def main():
     print(f"  output        {output_path}")
     print(f"  object-model  {args.object_model}")
     print(f"  court-model   {args.court_model}")
-    print(f"  conf          {args.conf:<10}  imgsz   {args.imgsz}")
+    print(f"  imgsz         {args.imgsz}")
     print(f"  device        {args.device or 'auto'}")
     print("─" * 60, flush=True)
 
@@ -85,8 +84,7 @@ def main():
     }
 
     # ── 物体检测（全部帧，全图推理）──────────────────────────────────────────
-    obj_detector = ObjectsDetector(args.object_model, conf=args.conf, imgsz=args.imgsz,
-                                    device=args.device)
+    obj_detector = ObjectsDetector(args.object_model, imgsz=args.imgsz, device=args.device)
     players, rackets, balls = obj_detector.run(
         iter_frames(args.input),
         total=n_frames,

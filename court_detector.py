@@ -73,6 +73,10 @@ COURT_LINES = [
 ]
 
 
+# ── 检测置信度阈值 ───────────────────────────────────────────────────────────
+_CONF_SEG = 0.10   # YOLO seg 球场分割置信度下限
+
+
 def compute_H_from_kps(court_kps):
     """从 14 个关键点计算单应矩阵 H（球场米坐标 → 图像像素）。"""
     kps_2d = np.array(court_kps).reshape(14, 2).astype(np.float32)
@@ -195,7 +199,7 @@ class CourtDetector:
         if fid != self._seg_cache_id:
             if self._seg_model is None:
                 raise RuntimeError("court seg model not loaded")
-            self._seg_cache_res = self._seg_model(frame, verbose=False, conf=0.1)
+            self._seg_cache_res = self._seg_model(frame, verbose=False, conf=_CONF_SEG)
             self._seg_cache_id  = fid
         return self._seg_cache_res
 
