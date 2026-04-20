@@ -6,7 +6,7 @@ import subprocess
 import numpy as np
 
 
-def pick_free_gpu() -> str | None:
+def pick_free_gpu():
     """返回空闲显存最多的 GPU 索引字符串；无 CUDA（如 macOS）时返回 None 让框架自动选。"""
     try:
         out = subprocess.check_output(
