@@ -137,6 +137,10 @@ def save_coco(width, height, players, rackets, balls, path, fps=None, court=None
                 }
                 if det.get('track_id') is not None:
                     ann['track_id'] = det['track_id']
+                if det.get('interpolated'):
+                    ann['interpolated'] = True
+                if det.get('backward_found'):
+                    ann['backward_found'] = True
                 if 'valid' in det:
                     ann['valid'] = det['valid']
                 if 'foot' in det:

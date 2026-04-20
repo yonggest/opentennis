@@ -120,7 +120,8 @@ def load_annotations(json_path: Path) -> tuple[dict, dict, dict | None]:
             "score":        ann.get("score", 1.0),
             "track_id":     ann.get("track_id"),
             "valid":        ann.get("valid", True),
-            "interpolated": ann.get("interpolated", False),
+            "interpolated":   ann.get("interpolated", False),
+            "backward_found": ann.get("backward_found", False),
         }
         if "foot" in ann:
             entry["foot"] = ann["foot"]
@@ -512,10 +513,11 @@ class BrowseApp(QMainWindow):
         for z, ann in enumerate(anns_sorted):
             cid   = ann["category_id"]
             x, y, w, h = ann["bbox"]
-            valid        = ann.get("valid", True)
-            track_id     = ann.get("track_id")
-            interpolated = ann.get("interpolated", False)
-            is_ball      = cid in self.ball_cids
+            valid         = ann.get("valid", True)
+            track_id      = ann.get("track_id")
+            interpolated  = ann.get("interpolated", False)
+            backward_found = ann.get("backward_found", False)
+            is_ball       = cid in self.ball_cids
 
             # ── 颜色 / 样式判断 ───────────────────────────────────────────────
             # parse 阶段 invalid（空间过滤）→ 暗色 + X
@@ -526,6 +528,10 @@ class BrowseApp(QMainWindow):
             elif is_ball and track_id is None and self._has_tracked:
                 color   = _BALL_UNTRACKED_COLOR
                 special = "untracked"
+            # 反向搜索找回的检测（置信度未达建轨阈值，事后归入轨迹）→ 轨迹色 + X
+            elif is_ball and backward_found:
+                color   = self._ball_traj_color(track_id)
+                special = "backward"
             # 插值帧 → 同 track_id 颜色 + 虚线
             elif is_ball and interpolated:
                 color   = self._ball_traj_color(track_id)
@@ -538,7 +544,7 @@ class BrowseApp(QMainWindow):
                 color   = self.category_colors.get(cid, QColor("white"))
                 special = None
 
-            pen = QPen(color, 1 if special in ("invalid", "untracked") else 2)
+            pen = QPen(color, 1 if special in ("invalid", "untracked", "backward") else 2)
             pen.setCosmetic(True)
             if special == "interpolated":
                 pen.setStyle(Qt.DashLine)
@@ -546,7 +552,7 @@ class BrowseApp(QMainWindow):
             box = self.scene.addRect(QRectF(x, y, w, h), pen, QBrush(Qt.NoBrush))
             box.setZValue(z + 1)
 
-            if special in ("invalid", "untracked"):
+            if special in ("invalid", "untracked", "backward"):
                 self.scene.addLine(x, y, x + w, y + h, pen).setZValue(z + 1)
                 self.scene.addLine(x + w, y, x, y + h, pen).setZValue(z + 1)
                 if special == "untracked":
@@ -708,9 +714,12 @@ class BrowseApp(QMainWindow):
         ])
         self.scene.addPolygon(right_poly, no_pen, mask_brush).setZValue(0.5)
 
-    def _build_ball_trajectories(self) -> dict[int, list[tuple[int, float, float, float]]]:
-        """返回 {track_id: [(frame_idx, cx, cy, ball_d_px), ...]}，仅含已追踪（track_id != None）的网球标注。
+    def _build_ball_trajectories(self) -> dict[int, list[tuple]]:
+        """返回 {track_id: [(frame_idx, cx, cy, ball_d_px, backward_found), ...]}。
+
+        仅含已追踪（track_id != None）的网球标注。
         ball_d_px 为检测 bbox 均值宽高，用于计算透视自适应搜索半径。
+        backward_found 标记该点是否由反向搜索找回（渲染时用虚线区分）。
         """
         traj: dict[int, list] = {}
         for frame_idx, anns in self.frame_anns.items():
@@ -721,7 +730,8 @@ class BrowseApp(QMainWindow):
                 x, y, w, h = ann["bbox"]
                 cx, cy = x + w / 2, y + h / 2
                 ball_d_px = (w + h) / 2.0
-                traj.setdefault(tid, []).append((frame_idx, cx, cy, ball_d_px))
+                backward = ann.get("backward_found", False)
+                traj.setdefault(tid, []).append((frame_idx, cx, cy, ball_d_px, backward))
         for pts in traj.values():
             pts.sort(key=lambda t: t[0])
         return traj
@@ -791,26 +801,46 @@ class BrowseApp(QMainWindow):
         return _BALL_TRAJ_COLORS[track_id % len(_BALL_TRAJ_COLORS)]
 
     def _render_ball_trajectories(self):
-        """绘制当前帧及之前的网球轨迹线段。"""
+        """绘制当前帧及之前的网球轨迹线段。
+
+        反向搜索找回的线段（backward_found）用虚线绘制，正常追踪线段用实线。
+        时序规则：backward 段仅在当前帧 >= 轨迹首个正向确认帧时才显示，
+        模拟"反向补齐"在轨迹被确认后才回溯出现的效果。
+        """
         cur = self.current_frame
+
+        # 计算每条轨迹的首个正向确认帧（非 backward 的最小帧号）
+        forward_start: dict[int, int] = {}
+        for tid, pts in self._ball_traj.items():
+            non_bwd = [p[0] for p in pts if not p[4]]
+            if non_bwd:
+                forward_start[tid] = min(non_bwd)
+
         for tid, pts in self._ball_traj.items():
             color = self._ball_traj_color(tid)
-            pen = QPen(color, 2)
-            pen.setCosmetic(True)
+            fwd_start = forward_start.get(tid, 0)
             prev = None
-            for frame_idx, cx, cy, *_ in pts:
+            for frame_idx, cx, cy, _, backward in pts:
                 if frame_idx > cur:
                     break
+                # backward 点：仅在轨迹已被正向确认后才显示
+                if backward and cur < fwd_start:
+                    prev = None   # 不与后续点相连
+                    continue
                 if prev is not None:
-                    pf, px, py = prev
+                    pf, px, py, prev_backward = prev
                     # 仅连接相邻帧，避免跨越长间隙时画长线
                     if frame_idx - pf <= self._ball_traj_max_age:
                         alpha = int(255 * max(0.2, 1.0 - (cur - frame_idx) / _BALL_TRAJ_FADE_FRAMES))
                         c = QColor(color)
                         c.setAlpha(alpha)
-                        p = QPen(c, 2); p.setCosmetic(True)
+                        p = QPen(c, 2)
+                        p.setCosmetic(True)
+                        # 两端点任一为反向找回则用虚线
+                        if backward or prev_backward:
+                            p.setStyle(Qt.DashLine)
                         _add_arrowed_line(self.scene, px, py, cx, cy, p)
-                prev = (frame_idx, cx, cy)
+                prev = (frame_idx, cx, cy, backward)
 
     def _render_predictions(self):
         """为每条活动轨迹绘制预测曲线及下一帧搜索圆。
@@ -824,7 +854,7 @@ class BrowseApp(QMainWindow):
         cur = self.current_frame
 
         for tid, pts in self._ball_traj.items():
-            # 取当前帧及之前的检测点（4-tuple: frame_idx, cx, cy, ball_d_px）
+            # 取当前帧及之前的检测点（5-tuple: frame_idx, cx, cy, ball_d_px, backward_found）
             past = [p for p in pts if p[0] <= cur]
             if not past:
                 continue

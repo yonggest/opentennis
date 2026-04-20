@@ -531,10 +531,92 @@ class BallTracker:
             if prepend:
                 tid_frames[tid] = sorted(prepend + tid_frames[tid], key=lambda x: x[0])
 
+        # ── 反向搜索（轨迹头部延伸）──────────────────────────────────────────
+        # 轨迹 CONFIRMED 后，从起始帧向前反向外推，把之前未匹配的低置信度检测点找回来。
+        # 策略：用轨迹最早的几个点做线性拟合，向负方向外推；第一个未命中帧即停止，
+        # 避免把不相关的噪点拼入轨迹头部。
+
+        assigned_det_ids: set = set()
+        for frames in tid_frames.values():
+            for fi, det in frames:
+                assigned_det_ids.add(id(det))
+
+        for tid in list(tid_frames.keys()):
+            frames = tid_frames[tid]
+            if len(frames) < 2:
+                continue
+
+            # 用轨迹最早的若干点拟合速度（反向外推用）
+            n_pts = min(len(frames), _LINEAR_WINDOW)
+            early = frames[:n_pts]
+            ts = np.array([fi for fi, _ in early], dtype=float)
+            xs = np.array([_center(det['bbox'])[0] for _, det in early], dtype=float)
+            ys = np.array([_center(det['bbox'])[1] for _, det in early], dtype=float)
+            t0 = ts[0]
+            tn = ts - t0
+            deg = min(1, len(early) - 1)
+            px = np.polyfit(tn, xs, deg)
+            py = np.polyfit(tn, ys, deg)
+
+            # 搜索半径：用轨迹第一个检测的 bbox 尺寸
+            x1, y1, x2, y2 = frames[0][1]['bbox']
+            bbox_d = (x2 - x1 + y2 - y1) / 2.0
+            gate = self._tracker.search_diameters * bbox_d
+
+            fi_start = frames[0][0]
+            prepend = []
+            consecutive_misses = 0
+            _MAX_BACKWARD_GAP = 1   # 允许连续未命中帧数（跨 1 帧间隙）
+            for back in range(1, self._tracker.max_age + 1):
+                fi_back = fi_start - back
+                if fi_back < 0:
+                    break
+                tp = fi_back - t0   # 负偏移，反向外推
+                pred_x = float(np.polyval(px, tp))
+                pred_y = float(np.polyval(py, tp))
+
+                best_det, best_dist = None, gate
+                for det in candidates[fi_back]:
+                    if id(det) in assigned_det_ids:
+                        continue
+                    if det.get('conf', 1.0) < self._tracker.conf_low:
+                        continue
+                    cx, cy = _center(det['bbox'])
+                    dist = ((cx - pred_x) ** 2 + (cy - pred_y) ** 2) ** 0.5
+                    if dist < best_dist:
+                        best_dist, best_det = dist, det
+
+                if best_det is None:
+                    consecutive_misses += 1
+                    if consecutive_misses > _MAX_BACKWARD_GAP:
+                        break   # 连续未命中超过允许间隙，停止反向搜索
+                else:
+                    consecutive_misses = 0
+                    assigned_det_ids.add(id(best_det))
+                    best_det['_backward'] = True   # 标记为反向搜索找回，供输出时写入 backward_found 字段
+                    prepend.append((fi_back, best_det))
+
+            if prepend:
+                prepend.sort(key=lambda x: x[0])
+                tid_frames[tid] = prepend + tid_frames[tid]
+
+        # 反向找到的检测在 tracked 中有对应副本（track_id=None），需要防止重复写入 output。
+        # 用 (fi, bbox 四舍五入) 作为签名标记，在 untracked dump 时跳过匹配副本。
+        backward_sigs: set = set()
+        for frames in tid_frames.values():
+            for fi, det in frames:
+                if det.get('track_id') is None and not det.get('_tid'):
+                    # 原始 candidates 中的 det：没有 track_id 也没有 _tid
+                    bbox = det.get('bbox', [])
+                    if bbox:
+                        backward_sigs.add((fi, tuple(round(v) for v in bbox)))
+
         # ── Gap 线性插值，写入 output ─────────────────────────────────────────
         def _clean(det, **overrides):
-            d = {k: v for k, v in det.items() if k != '_tid'}
+            d = {k: v for k, v in det.items() if k not in ('_tid', '_backward')}
             d.update(overrides)
+            if det.get('_backward'):
+                d['backward_found'] = True
             return d
 
         output = [[] for _ in range(n)]
@@ -575,6 +657,10 @@ class BallTracker:
         for fi, frame_dets in enumerate(tracked):
             for det in frame_dets:
                 if det.get('track_id') is None and id(det) not in backfilled:
+                    bbox = det.get('bbox', [])
+                    sig = (fi, tuple(round(v) for v in bbox)) if bbox else None
+                    if sig and sig in backward_sigs:
+                        continue  # 反向搜索已将此检测归入轨迹，跳过重复写入
                     output[fi].append(_clean(det, track_id=None))
 
         n_raw     = sum(len(f) for f in ball_detections)
