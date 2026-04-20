@@ -505,6 +505,16 @@ class BrowseApp(QMainWindow):
         font_size = max(12, self._img_h // 80)
         font = QFont("Menlo", font_size)
 
+        # 计算每条轨迹的首个正向确认帧（非 backward 点的最小帧号），
+        # 用于 backward_found 检测框的因果性判断：确认前按未追踪样式显示
+        forward_start: dict[int, int] = {}
+        if self._ball_traj:
+            for tid, pts in self._ball_traj.items():
+                non_bwd = [p[0] for p in pts if not p[4]]
+                if non_bwd:
+                    forward_start[tid] = min(non_bwd)
+        cur = self.current_frame
+
         anns_sorted = sorted(
             [a for a in anns if a.get("category_id", 0) in self.visible_cats],
             key=lambda a: a["bbox"][2] * a["bbox"][3],
@@ -528,11 +538,28 @@ class BrowseApp(QMainWindow):
             elif is_ball and track_id is None and self._has_tracked:
                 color   = _BALL_UNTRACKED_COLOR
                 special = "untracked"
-            # 反向搜索找回的检测（置信度未达建轨阈值，事后归入轨迹）→ 轨迹色 + X
+            # 反向搜索找回的检测 / 反向插值帧
+            # 因果性原则：
+            #   确认前（cur < fwd_start）：
+            #     真实检测 → 按原来未追踪样式显示（暗色 + X）
+            #     合成插值帧 → 完全不显示（原本不存在）
+            #   确认后（cur >= fwd_start）：全部补全显示
+            #     真实检测 → 轨迹色 + X（backward 样式）
+            #     插值帧   → 轨迹色 + 虚线（interpolated 样式）
             elif is_ball and backward_found:
-                color   = self._ball_traj_color(track_id)
-                special = "backward"
-            # 插值帧 → 同 track_id 颜色 + 虚线
+                fwd_start = forward_start.get(track_id)
+                if fwd_start is not None and cur < fwd_start:
+                    if interpolated:
+                        continue   # 合成帧确认前不存在，直接跳过
+                    color   = _BALL_UNTRACKED_COLOR
+                    special = "untracked"
+                elif interpolated:
+                    color   = self._ball_traj_color(track_id)
+                    special = "interpolated"
+                else:
+                    color   = self._ball_traj_color(track_id)
+                    special = "backward"
+            # 正向插值帧 → 同 track_id 颜色 + 虚线
             elif is_ball and interpolated:
                 color   = self._ball_traj_color(track_id)
                 special = "interpolated"

@@ -637,10 +637,15 @@ class BallTracker:
                         alpha = t / gap
                         cx = cx_a + alpha * (cx_b - cx_a)
                         cy = cy_a + alpha * (cy_b - cy_a)
-                        output[fi_a + t].append({
+                        interp = {
                             'bbox': [cx - w/2, cy - h/2, cx + w/2, cy + h/2],
                             'conf': 0.0, 'track_id': tid, 'interpolated': True,
-                        })
+                        }
+                        # 反向找回的检测与下一帧之间的插值帧也继承 backward_found，
+                        # 确保 browse.py 的因果性检查正确覆盖这段区间
+                        if det_a.get('_backward'):
+                            interp['backward_found'] = True
+                        output[fi_a + t].append(interp)
             fi_last, det_last = frames[-1]
             output[fi_last].append(_clean(det_last, track_id=tid))
 
