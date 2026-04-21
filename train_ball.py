@@ -66,7 +66,7 @@ def main():
     results = model.train(
         data        = args.data,
         epochs      = args.epochs,
-        batch       = 16,           # patch 很小，batch 可以开大
+        batch       = 1024,         # patch 很小，batch 可以开大
         imgsz       = args.imgsz,
         lr0         = args.lr0,
         lrf         = 0.05,
