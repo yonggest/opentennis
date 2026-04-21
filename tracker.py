@@ -16,6 +16,7 @@
   PlayerTracker — 封装 Tracker，以脚点（bbox 底部中心）为追踪锚点
 """
 
+import os
 import cv2
 import numpy as np
 from scipy.optimize import linear_sum_assignment
@@ -406,13 +407,14 @@ class Tracker:
 # ── Rescue 辅助 ───────────────────────────────────────────────────────────────
 
 
-def _rescue_crop_detect(frame, cx, cy, model, conf_thr, fi, tid):
+def _rescue_crop_detect(frame, cx, cy, model, conf_thr, fi, tid, save_dir=None):
     """以 (cx, cy) 为中心裁 _RESCUE_PATCH×_RESCUE_PATCH，用 model 检测网球。
 
     始终以极低置信度（0.01）提取所有候选并打印，然后返回置信度 >= conf_thr 的最高分
     检测（转换到原图坐标的 det dict）；若无则返回 None。
 
-    fi / tid 仅用于打印调试信息。
+    fi / tid  仅用于打印和文件命名。
+    save_dir  不为 None 时，将 patch 图（叠加预测中心 + 检测框）存入该目录。
     """
     h, w = frame.shape[:2]
     patch = _RESCUE_PATCH
@@ -425,27 +427,48 @@ def _rescue_crop_detect(frame, cx, cy, model, conf_thr, fi, tid):
     y0 = max(0, min(y0, h - patch))
     crop = frame[y0:y0 + patch, x0:x0 + patch]
 
-    # 以极低置信度推断，获取全部候选
+    # 以极低置信度推断，获取全部候选（坐标保留 patch 内相对坐标，方便存图标注）
     results = model.predict(crop, imgsz=patch, conf=0.01, verbose=False)
-    candidates = []
+    candidates_crop  = []   # (conf, x1, y1, x2, y2) — patch 内坐标
+    candidates_frame = []   # (conf, x1, y1, x2, y2) — 原图坐标
     for r in results:
         for box in r.boxes:
             c = float(box.conf)
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
-            candidates.append((c, x1 + x0, y1 + y0, x2 + x0, y2 + y0))
-    candidates.sort(key=lambda x: -x[0])
+            px1, py1, px2, py2 = box.xyxy[0].tolist()
+            candidates_crop.append((c, px1, py1, px2, py2))
+            candidates_frame.append((c, px1 + x0, py1 + y0, px2 + x0, py2 + y0))
+    candidates_crop.sort(key=lambda x: -x[0])
+    candidates_frame.sort(key=lambda x: -x[0])
 
     # 打印最佳候选（无论是否达到阈值）
-    if candidates:
-        c, x1, y1, x2, y2 = candidates[0]
+    if candidates_frame:
+        c, x1, y1, x2, y2 = candidates_frame[0]
         best_str = f"conf={c:.3f} bbox=[{round(x1)},{round(y1)},{round(x2)},{round(y2)}]"
     else:
         best_str = '(none)'
     print(f"[ rescue] f{fi:05d}  tid={tid}  pred=({round(cx)},{round(cy)})"
           f"  best: {best_str}")
 
-    # 返回置信度 >= conf_thr 的最高分检测
-    for c, x1, y1, x2, y2 in candidates:
+    # 保存调试 patch 图（可选）
+    if save_dir is not None:
+        os.makedirs(save_dir, exist_ok=True)
+        vis = crop.copy()
+        # 预测中心（蓝色十字）
+        cv2.drawMarker(vis, (half, half), (255, 100, 0),
+                       cv2.MARKER_CROSS, 12, 1, cv2.LINE_AA)
+        # 最佳检测框（命中阈值→绿色，低置信→橙色，无检测→不画）
+        if candidates_crop:
+            bc, bx1, by1, bx2, by2 = candidates_crop[0]
+            color = (0, 200, 0) if bc >= conf_thr else (0, 140, 255)
+            cv2.rectangle(vis, (int(bx1), int(by1)), (int(bx2), int(by2)), color, 1)
+            cv2.putText(vis, f"{bc:.2f}", (int(bx1), max(int(by1) - 2, 8)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1, cv2.LINE_AA)
+        tag  = f"{candidates_crop[0][0]:.3f}" if candidates_crop else "none"
+        name = f"rescue_f{fi:05d}_tid{tid}_conf{tag}.jpg"
+        cv2.imwrite(os.path.join(save_dir, name), vis)
+
+    # 返回置信度 >= conf_thr 的最高分检测（原图坐标）
+    for c, x1, y1, x2, y2 in candidates_frame:
         if c >= conf_thr:
             return {'bbox': [x1, y1, x2, y2], 'conf': c}
     return None
@@ -467,23 +490,25 @@ class BallTracker:
                  conf_high=0.5, conf_low=0.1,
                  search_diameters=_SEARCH_DIAMETERS, max_dist=None,
                  min_area=20.0, max_area=8000.0, min_aspect=0.3,
-                 rescue_model=None, rescue_conf=0.5):
-        self._tracker       = Tracker(min_hits=min_hits, max_age=max_age,
-                                      conf_high=conf_high, conf_low=conf_low,
-                                      search_diameters=search_diameters,
-                                      max_dist=max_dist)
-        self.min_area       = min_area
-        self.max_area       = max_area
-        self.min_aspect     = min_aspect
-        self._rescue_model  = rescue_model
-        self._rescue_conf   = rescue_conf
+                 rescue_model=None, rescue_conf=0.5, rescue_save_dir=None):
+        self._tracker        = Tracker(min_hits=min_hits, max_age=max_age,
+                                       conf_high=conf_high, conf_low=conf_low,
+                                       search_diameters=search_diameters,
+                                       max_dist=max_dist)
+        self.min_area        = min_area
+        self.max_area        = max_area
+        self.min_aspect      = min_aspect
+        self._rescue_model   = rescue_model
+        self._rescue_conf    = rescue_conf
+        self._rescue_save_dir = rescue_save_dir
 
     @classmethod
     def from_video(cls, fps: float, px_per_meter: float,
                    conf_high: float = 0.5, conf_low: float = 0.1,
                    min_aspect: float = 0.3,
                    search_diameters: float = _SEARCH_DIAMETERS,
-                   rescue_model=None, rescue_conf: float = 0.5):
+                   rescue_model=None, rescue_conf: float = 0.5,
+                   rescue_save_dir=None):
         """
         根据帧率和像素/米比例推算各参数。
 
@@ -512,7 +537,8 @@ class BallTracker:
                    conf_high=conf_high, conf_low=conf_low,
                    search_diameters=search_diameters, max_dist=max_dist,
                    min_area=min_area, max_area=max_area, min_aspect=min_aspect,
-                   rescue_model=rescue_model, rescue_conf=rescue_conf)
+                   rescue_model=rescue_model, rescue_conf=rescue_conf,
+                   rescue_save_dir=rescue_save_dir)
 
     def run(self, ball_detections, debug_frame: int = -1, frames=None):
         """
@@ -565,7 +591,8 @@ class BallTracker:
                 for t in unmatched:
                     cx, cy = t.predicted_center
                     rdet = _rescue_crop_detect(
-                        frame, cx, cy, self._rescue_model, self._rescue_conf, fi, t.id)
+                        frame, cx, cy, self._rescue_model, self._rescue_conf, fi, t.id,
+                        save_dir=self._rescue_save_dir)
                     if rdet is None:
                         continue
                     rescue_hit += 1
