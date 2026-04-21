@@ -357,17 +357,21 @@ class Tracker:
         for ti, di in matched1:
             self._tracks[ti].update(dets_high[di], frame_idx)
 
-        # 3. 阶段二：阶段一未匹配的轨迹 vs 低置信度检测（逐轨迹门限）
+        # 3. 阶段二：阶段一未匹配的 CONFIRMED 轨迹 vs 低置信度检测（逐轨迹门限）
+        # 仅 CONFIRMED 轨迹参与：TENTATIVE 轨迹不抢低置信度检测，防止"抢占"导致
+        # CONFIRMED 轨迹丢失检测点，进而触发 rescue 产生重复轨迹。
         matched2 = []
         if unmatched_t1 and dets_low:
-            tracks2 = [self._tracks[ti] for ti in unmatched_t1]
+            unmatched_t1_confirmed = [ti for ti in unmatched_t1
+                                      if self._tracks[ti].state == TrackState.CONFIRMED]
+            tracks2 = [self._tracks[ti] for ti in unmatched_t1_confirmed]
             gates2  = [t.effective_gate for t in tracks2]
             matched2_local, _, _ = _match(
                 tracks2, dets_low, gates2,
                 anchor_fn=self._anchor_fn, size_gate=self._size_gate,
                 hist_weight=self._hist_weight, hist_gate=self._hist_gate)
             for i2, di2 in matched2_local:
-                ti = unmatched_t1[i2]
+                ti = unmatched_t1_confirmed[i2]
                 self._tracks[ti].update(dets_low[di2], frame_idx)
                 matched2.append((ti, idx_low[di2]))
 
@@ -401,10 +405,14 @@ class Tracker:
 
 # ── Rescue 辅助 ───────────────────────────────────────────────────────────────
 
-def _rescue_crop_detect(frame, cx, cy, model, conf_thr):
+
+def _rescue_crop_detect(frame, cx, cy, model, conf_thr, fi, tid):
     """以 (cx, cy) 为中心裁 _RESCUE_PATCH×_RESCUE_PATCH，用 model 检测网球。
 
-    返回转换到原图坐标的 det dict（含 bbox/conf），若无检测则返回 None。
+    始终以极低置信度（0.01）提取所有候选并打印，然后返回置信度 >= conf_thr 的最高分
+    检测（转换到原图坐标的 det dict）；若无则返回 None。
+
+    fi / tid 仅用于打印调试信息。
     """
     h, w = frame.shape[:2]
     patch = _RESCUE_PATCH
@@ -416,18 +424,31 @@ def _rescue_crop_detect(frame, cx, cy, model, conf_thr):
     x0 = max(0, min(x0, w - patch))
     y0 = max(0, min(y0, h - patch))
     crop = frame[y0:y0 + patch, x0:x0 + patch]
-    results = model.predict(crop, imgsz=patch, conf=conf_thr, verbose=False)
-    best = None
+
+    # 以极低置信度推断，获取全部候选
+    results = model.predict(crop, imgsz=patch, conf=0.01, verbose=False)
+    candidates = []
     for r in results:
         for box in r.boxes:
             c = float(box.conf)
-            if best is None or c > best[0]:
-                x1, y1, x2, y2 = box.xyxy[0].tolist()
-                best = (c, x1 + x0, y1 + y0, x2 + x0, y2 + y0)
-    if best is None:
-        return None
-    c, x1, y1, x2, y2 = best
-    return {'bbox': [x1, y1, x2, y2], 'conf': c}
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            candidates.append((c, x1 + x0, y1 + y0, x2 + x0, y2 + y0))
+    candidates.sort(key=lambda x: -x[0])
+
+    # 打印最佳候选（无论是否达到阈值）
+    if candidates:
+        c, x1, y1, x2, y2 = candidates[0]
+        best_str = f"conf={c:.3f} bbox=[{round(x1)},{round(y1)},{round(x2)},{round(y2)}]"
+    else:
+        best_str = '(none)'
+    print(f"[ rescue] f{fi:05d}  tid={tid}  pred=({round(cx)},{round(cy)})"
+          f"  best: {best_str}")
+
+    # 返回置信度 >= conf_thr 的最高分检测
+    for c, x1, y1, x2, y2 in candidates:
+        if c >= conf_thr:
+            return {'bbox': [x1, y1, x2, y2], 'conf': c}
+    return None
 
 
 # ── 网球追踪器 ────────────────────────────────────────────────────────────────
@@ -487,9 +508,6 @@ class BallTracker:
               f"max_age={max_age}f  min_hits={min_hits}f  "
               f"conf=[{conf_low},{conf_high})")
 
-        if rescue_model is not None:
-            print(f"[ rescue] model={rescue_model}  patch={_RESCUE_PATCH}  conf={rescue_conf}")
-
         return cls(min_hits=min_hits, max_age=max_age,
                    conf_high=conf_high, conf_low=conf_low,
                    search_diameters=search_diameters, max_dist=max_dist,
@@ -547,19 +565,13 @@ class BallTracker:
                 for t in unmatched:
                     cx, cy = t.predicted_center
                     rdet = _rescue_crop_detect(
-                        frame, cx, cy, self._rescue_model, self._rescue_conf)
+                        frame, cx, cy, self._rescue_model, self._rescue_conf, fi, t.id)
                     if rdet is None:
                         continue
                     rescue_hit += 1
                     t.update(rdet, fi)
-                    result.append(dict(rdet,
-                                       track_id=t.id if t.state == TrackState.CONFIRMED else None,
-                                       _tid=t.id,
-                                       _rescue=True))
-                    print(f"[ rescue] f{fi:05d}  tid={t.id}"
-                          f"  pred=({cx:.0f},{cy:.0f})"
-                          f"  bbox={[round(v) for v in rdet['bbox']]}"
-                          f"  conf={rdet['conf']:.3f}")
+                    # 选出来的 t 本就是 CONFIRMED，update() 不会降级，track_id 直接用 t.id
+                    result.append(dict(rdet, track_id=t.id, _tid=t.id, _rescue=True))
 
             tracked.append(result)
             if fi == debug_frame:

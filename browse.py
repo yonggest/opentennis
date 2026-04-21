@@ -122,6 +122,7 @@ def load_annotations(json_path: Path) -> tuple[dict, dict, dict | None]:
             "valid":        ann.get("valid", True),
             "interpolated":   ann.get("interpolated", False),
             "backward_found": ann.get("backward_found", False),
+            "rescue":         ann.get("rescue", False),
         }
         if "foot" in ann:
             entry["foot"] = ann["foot"]
@@ -527,6 +528,7 @@ class BrowseApp(QMainWindow):
             track_id      = ann.get("track_id")
             interpolated  = ann.get("interpolated", False)
             backward_found = ann.get("backward_found", False)
+            rescue        = ann.get("rescue", False)
             is_ball       = cid in self.ball_cids
 
             # ── 颜色 / 样式判断 ───────────────────────────────────────────────
@@ -614,6 +616,8 @@ class BrowseApp(QMainWindow):
                 label = f"{label} {score:.2f}"
             if special in ("interpolated", "invalid_interp"):
                 label = f"{label} ~"
+            if rescue:
+                label = f"{label} [R]"
 
             txt = self.scene.addSimpleText(label, font)
             txt.setBrush(QBrush(color))
@@ -1196,13 +1200,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
-            "  python browse.py -v match.mp4 -j detections.json\n"
+            "  python browse.py detections.json\n"
         ),
     )
-    parser.add_argument("-v", "--video", default=None, metavar="VIDEO",
-                        help="input video file（默认：从 JSON 的 video 字段读取）")
-    parser.add_argument("-j", "--json",  required=True, metavar="JSON",
-                        help="annotation JSON (COCO format)")
+    parser.add_argument("json", metavar="JSON",
+                        help="annotation JSON (COCO format)，视频路径从 video 字段读取")
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(0)
@@ -1213,14 +1215,10 @@ def main():
         print(f"错误: JSON 文件不存在: {json_path}", file=sys.stderr)
         sys.exit(1)
 
-    frame_anns, categories, court, video_from_json = load_annotations(json_path)
+    frame_anns, categories, court, video_path = load_annotations(json_path)
 
-    if args.video:
-        video_path = Path(args.video).resolve()
-    elif video_from_json:
-        video_path = video_from_json
-    else:
-        print("错误: 未指定 -v，且 JSON 中未包含 video 字段", file=sys.stderr)
+    if not video_path:
+        print("错误: JSON 中未包含 video 字段，无法定位视频文件", file=sys.stderr)
         sys.exit(1)
 
     if not video_path.exists():

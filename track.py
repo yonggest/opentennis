@@ -9,6 +9,7 @@
 """
 
 import argparse
+import logging
 import os
 import sys
 from pathlib import Path
@@ -16,7 +17,7 @@ from pathlib import Path
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 
-from utils import load_detections, save_coco, iter_frames, propagate_video
+from utils import load_detections, load_video_path, save_coco, iter_frames, propagate_video
 from tracker import BallTracker, PlayerTracker, RacketTracker
 from court_detector import COURT_W as _COURT_W
 
@@ -151,7 +152,11 @@ def main():
             print(f"[ rescue] 警告：模型不存在 {rescue_model_path}，rescue 已禁用")
         else:
             from ultralytics import YOLO
-            rescue_model = YOLO(rescue_model_path)
+            from ultralytics.utils import LOGGER as _ul_logger
+            _prev_level = _ul_logger.level
+            _ul_logger.setLevel(logging.WARNING)
+            rescue_model = YOLO(rescue_model_path, verbose=False)
+            _ul_logger.setLevel(_prev_level)
             print(f"[ rescue] 已加载 {rescue_model_path}")
 
     print("─" * 60)
@@ -165,13 +170,15 @@ def main():
     fps, width, height, court, players, rackets, balls = load_detections(args.input)
     ppm = _px_per_meter(court['keypoints'])
 
-    # 自动查找与 JSON 同目录同名的视频文件（供球员颜色直方图 Re-ID 使用）
-    video_path = None
-    for ext in _VIDEO_EXTENSIONS:
-        candidate = stem + ext
-        if os.path.exists(candidate):
-            video_path = candidate
-            break
+    # 查找视频文件：优先读 JSON 的 video 字段，再按扩展名枚举
+    video_path = load_video_path(args.input)
+    if video_path is None or not os.path.exists(video_path):
+        video_path = None
+        for ext in _VIDEO_EXTENSIONS:
+            candidate = stem + ext
+            if os.path.exists(candidate):
+                video_path = candidate
+                break
     if video_path:
         print(f"[ player ] video → {video_path}  颜色直方图外观匹配已启用")
     else:

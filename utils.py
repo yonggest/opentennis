@@ -158,6 +158,8 @@ def save_coco(width, height, players, rackets, balls, path, fps=None, court=None
                     ann['interpolated'] = True
                 if det.get('backward_found'):
                     ann['backward_found'] = True
+                if det.get('_rescue'):
+                    ann['rescue'] = True
                 if 'valid' in det:
                     ann['valid'] = det['valid']
                 if 'foot' in det:
@@ -244,6 +246,8 @@ def load_detections(path):
             det['interpolated'] = True
         if ann.get('backward_found'):
             det['backward_found'] = True
+        if ann.get('rescue'):
+            det['rescue'] = True
         if 'foot' in ann:
             det['foot'] = ann['foot']
         if 'center' in ann:
