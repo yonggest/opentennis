@@ -174,12 +174,13 @@ def _filter_balls(balls, left_wall_q, right_wall_q, volume_hull, fps=25.0):
     has_tracked = any(d.get('track_id') is not None
                       for frame in balls for d in frame)
 
-    # 收集每条轨迹的 (frame_idx, cx, cy)
+    # 收集每条轨迹的 (frame_idx, cx, cy)，只用真实检测点（不含插值）
+    # 插值点是线性合成的，若混入会让 _find_stop_frame 误判为"始终在运动"
     track_pts = defaultdict(list)
     for fi, frame in enumerate(balls):
         for d in frame:
             tid = d.get('track_id')
-            if tid is not None:
+            if tid is not None and not d.get('interpolated'):
                 cx = (d['bbox'][0] + d['bbox'][2]) / 2
                 cy = (d['bbox'][1] + d['bbox'][3]) / 2
                 track_pts[tid].append((fi, cx, cy))

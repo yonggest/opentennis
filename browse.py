@@ -530,10 +530,21 @@ class BrowseApp(QMainWindow):
             is_ball       = cid in self.ball_cids
 
             # ── 颜色 / 样式判断 ───────────────────────────────────────────────
-            # parse 阶段 invalid（空间过滤）→ 暗色 + X
+            # parse 阶段 invalid：
+            #   球轨迹点（有 track_id）→ 轨迹色 + X，保留 conf/标签显示
+            #   非球 / 无 track_id   → 暗色 + X（原逻辑）
             if not valid:
-                color   = self.category_dark_colors.get(cid, QColor("white"))
-                special = "invalid"
+                if is_ball and track_id is not None:
+                    # 因果性检查：backward+interpolated 合成帧在确认前仍须隐藏
+                    if backward_found and interpolated:
+                        fwd_start = forward_start.get(track_id)
+                        if fwd_start is not None and cur < fwd_start:
+                            continue
+                    color   = self._ball_traj_color(track_id)
+                    special = "invalid_interp" if interpolated else "invalid"
+                else:
+                    color   = self.category_dark_colors.get(cid, QColor("white"))
+                    special = "invalid"
             # track 阶段未追踪（track_id=None）→ 暗橙 + X（仅在 tracked JSON 中生效）
             elif is_ball and track_id is None and self._has_tracked:
                 color   = _BALL_UNTRACKED_COLOR
@@ -571,15 +582,15 @@ class BrowseApp(QMainWindow):
                 color   = self.category_colors.get(cid, QColor("white"))
                 special = None
 
-            pen = QPen(color, 1 if special in ("invalid", "untracked", "backward") else 2)
+            pen = QPen(color, 1 if special in ("invalid", "invalid_interp", "untracked", "backward") else 2)
             pen.setCosmetic(True)
-            if special == "interpolated":
+            if special in ("interpolated", "invalid_interp"):
                 pen.setStyle(Qt.DashLine)
 
             box = self.scene.addRect(QRectF(x, y, w, h), pen, QBrush(Qt.NoBrush))
             box.setZValue(z + 1)
 
-            if special in ("invalid", "untracked", "backward"):
+            if special in ("invalid", "invalid_interp", "untracked", "backward"):
                 self.scene.addLine(x, y, x + w, y + h, pen).setZValue(z + 1)
                 self.scene.addLine(x + w, y, x, y + h, pen).setZValue(z + 1)
                 if special == "untracked":
@@ -589,7 +600,8 @@ class BrowseApp(QMainWindow):
                         lbl.setBrush(QBrush(color))
                         lbl.setPos(x, y - font_size * 1.4 if y >= font_size * 1.4 else y + h + 2)
                         lbl.setZValue(len(anns_sorted) + z + 1)
-                continue
+                if special not in ("invalid", "invalid_interp"):
+                    continue
 
             if cid in self.player_cids and track_id is not None:
                 label = f"P{track_id}"
@@ -598,9 +610,9 @@ class BrowseApp(QMainWindow):
             else:
                 label = self.category_labels.get(cid, "?")
             score = ann.get("score")
-            if score is not None and score != 1.0:
+            if score is not None and score != 1.0 and special not in ("interpolated", "invalid_interp"):
                 label = f"{label} {score:.2f}"
-            if special == "interpolated":
+            if special in ("interpolated", "invalid_interp"):
                 label = f"{label} ~"
 
             txt = self.scene.addSimpleText(label, font)

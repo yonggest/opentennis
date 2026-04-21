@@ -240,6 +240,10 @@ def load_detections(path):
             'track_id': ann.get('track_id'),
             'valid':    ann.get('valid', True),
         }
+        if ann.get('interpolated'):
+            det['interpolated'] = True
+        if ann.get('backward_found'):
+            det['backward_found'] = True
         if 'foot' in ann:
             det['foot'] = ann['foot']
         if 'center' in ann:

@@ -51,7 +51,7 @@ def _ann_matches(ann: dict, cat_ids: set | None, filter_mode: str) -> bool:
     if filter_mode == 'invalid':
         return not ann.get('valid', True)
     if filter_mode == 'interpolated':
-        return ann.get('interpolated', False)
+        return ann.get('valid', True) and ann.get('interpolated', False)
     return True
 
 
@@ -131,7 +131,7 @@ def build_coco_dataset(json_path: Path, out_dir: Path,
             pbar.update(1)
     cap.release()
 
-    # 迁移满足条件的标注
+    # 迁移标注：与帧选择标准一致，只写出满足 filter 条件的标注
     coco_annotations = []
     for frame_id in kept_frame_ids:
         new_img_id = new_id_map.get(frame_id)
