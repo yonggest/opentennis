@@ -11,6 +11,7 @@
 import argparse
 import os
 import sys
+from pathlib import Path
 
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
@@ -122,6 +123,8 @@ def parse_args():
     p.add_argument('--conf-high',            type=float, default=0.5,  help='高置信度阈值：>= 此值的检测可新建轨迹')
     p.add_argument('--conf-low',             type=float, default=0.1,  help='低置信度下限：[low,high) 的检测仅续接已有轨迹')
     p.add_argument('--search-diameters',     type=float, default=2.0,  help='球追踪搜索半径 = N × 球径（px）')
+    p.add_argument('--rescue-model',         default=None,             help='rescue 专项球检测模型路径（不传则不启用）')
+    p.add_argument('--rescue-conf',          type=float, default=0.5,  help='rescue 检测置信度阈值')
     p.add_argument('--debug-frame',          type=int,   default=-1,   help='打印指定帧的追踪器内部状态（-1 关闭）')
     if len(sys.argv) == 1:
         p.print_help()
@@ -140,11 +143,23 @@ def main():
         stem = stem[:-len('.detected')]
     output_path = args.output or stem + '.tracked.json'
 
+    # 加载 rescue 模型（可选）
+    rescue_model = None
+    rescue_model_path = args.rescue_model or str(Path(__file__).parent / 'models/yolo26n-ball.pt')
+    if args.rescue_model or Path(rescue_model_path).exists():
+        if not Path(rescue_model_path).exists():
+            print(f"[ rescue] 警告：模型不存在 {rescue_model_path}，rescue 已禁用")
+        else:
+            from ultralytics import YOLO
+            rescue_model = YOLO(rescue_model_path)
+            print(f"[ rescue] 已加载 {rescue_model_path}")
+
     print("─" * 60)
     print(f"  input      {args.input}")
     print(f"  output     {output_path}")
     print(f"  conf       [{args.conf_low}, {args.conf_high})")
     print(f"  search     {args.search_diameters}× ball_d")
+    print(f"  rescue     {rescue_model_path if rescue_model else '禁用'}  conf={args.rescue_conf}")
     print("─" * 60, flush=True)
 
     fps, width, height, court, players, rackets, balls = load_detections(args.input)
@@ -181,7 +196,9 @@ def main():
         fps, ppm,
         conf_high=args.conf_high, conf_low=args.conf_low,
         search_diameters=args.search_diameters,
-    ).run(balls, debug_frame=args.debug_frame)
+        rescue_model=rescue_model, rescue_conf=args.rescue_conf,
+    ).run(balls, debug_frame=args.debug_frame,
+          frames=iter_frames(video_path) if video_path else None)
 
     save_coco(width, height, players, rackets, balls,
               output_path, fps=fps, court=court,

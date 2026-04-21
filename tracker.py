@@ -20,6 +20,9 @@ import cv2
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
+# rescue 推断裁图尺寸（与 yolo26n-ball.pt 训练 imgsz 一致）
+_RESCUE_PATCH = 96
+
 
 # ── 物理常量 ──────────────────────────────────────────────────────────────────
 
@@ -396,6 +399,37 @@ class Tracker:
                 for i, det in enumerate(detections)]
 
 
+# ── Rescue 辅助 ───────────────────────────────────────────────────────────────
+
+def _rescue_crop_detect(frame, cx, cy, model, conf_thr):
+    """以 (cx, cy) 为中心裁 _RESCUE_PATCH×_RESCUE_PATCH，用 model 检测网球。
+
+    返回转换到原图坐标的 det dict（含 bbox/conf），若无检测则返回 None。
+    """
+    h, w = frame.shape[:2]
+    patch = _RESCUE_PATCH
+    if w < patch or h < patch:
+        return None
+    half = patch // 2
+    x0 = int(round(cx)) - half
+    y0 = int(round(cy)) - half
+    x0 = max(0, min(x0, w - patch))
+    y0 = max(0, min(y0, h - patch))
+    crop = frame[y0:y0 + patch, x0:x0 + patch]
+    results = model.predict(crop, imgsz=patch, conf=conf_thr, verbose=False)
+    best = None
+    for r in results:
+        for box in r.boxes:
+            c = float(box.conf)
+            if best is None or c > best[0]:
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                best = (c, x1 + x0, y1 + y0, x2 + x0, y2 + y0)
+    if best is None:
+        return None
+    c, x1, y1, x2, y2 = best
+    return {'bbox': [x1, y1, x2, y2], 'conf': c}
+
+
 # ── 网球追踪器 ────────────────────────────────────────────────────────────────
 
 class BallTracker:
@@ -411,20 +445,24 @@ class BallTracker:
     def __init__(self, min_hits=3, max_age=5,
                  conf_high=0.5, conf_low=0.1,
                  search_diameters=_SEARCH_DIAMETERS, max_dist=None,
-                 min_area=20.0, max_area=8000.0, min_aspect=0.3):
-        self._tracker   = Tracker(min_hits=min_hits, max_age=max_age,
-                                  conf_high=conf_high, conf_low=conf_low,
-                                  search_diameters=search_diameters,
-                                  max_dist=max_dist)
-        self.min_area   = min_area
-        self.max_area   = max_area
-        self.min_aspect = min_aspect
+                 min_area=20.0, max_area=8000.0, min_aspect=0.3,
+                 rescue_model=None, rescue_conf=0.5):
+        self._tracker       = Tracker(min_hits=min_hits, max_age=max_age,
+                                      conf_high=conf_high, conf_low=conf_low,
+                                      search_diameters=search_diameters,
+                                      max_dist=max_dist)
+        self.min_area       = min_area
+        self.max_area       = max_area
+        self.min_aspect     = min_aspect
+        self._rescue_model  = rescue_model
+        self._rescue_conf   = rescue_conf
 
     @classmethod
     def from_video(cls, fps: float, px_per_meter: float,
                    conf_high: float = 0.5, conf_low: float = 0.1,
                    min_aspect: float = 0.3,
-                   search_diameters: float = _SEARCH_DIAMETERS):
+                   search_diameters: float = _SEARCH_DIAMETERS,
+                   rescue_model=None, rescue_conf: float = 0.5):
         """
         根据帧率和像素/米比例推算各参数。
 
@@ -449,12 +487,16 @@ class BallTracker:
               f"max_age={max_age}f  min_hits={min_hits}f  "
               f"conf=[{conf_low},{conf_high})")
 
+        if rescue_model is not None:
+            print(f"[ rescue] model={rescue_model}  patch={_RESCUE_PATCH}  conf={rescue_conf}")
+
         return cls(min_hits=min_hits, max_age=max_age,
                    conf_high=conf_high, conf_low=conf_low,
                    search_diameters=search_diameters, max_dist=max_dist,
-                   min_area=min_area, max_area=max_area, min_aspect=min_aspect)
+                   min_area=min_area, max_area=max_area, min_aspect=min_aspect,
+                   rescue_model=rescue_model, rescue_conf=rescue_conf)
 
-    def run(self, ball_detections, debug_frame: int = -1):
+    def run(self, ball_detections, debug_frame: int = -1, frames=None):
         """
         输入：ball_detections[i] = [{'bbox', 'conf', 'track_id'}, ...]
         输出：同结构，CONFIRMED 轨迹含 track_id(int)，gap 帧线性插值（conf=0.0，interpolated=True）
@@ -488,8 +530,33 @@ class BallTracker:
 
         # ── 逐帧追踪 ─────────────────────────────────────────────────────────
         tracked = []
+        frame_iter     = iter(frames) if frames is not None else None
+        rescue_total   = 0   # 累计触发 rescue 的（轨迹×帧）次数
+        rescue_hit     = 0   # 累计 rescue 成功次数
+
         for fi, frame_dets in enumerate(candidates):
+            frame  = next(frame_iter) if frame_iter is not None else None
             result = self._tracker.step(frame_dets, fi)
+
+            # ── Rescue：对未匹配的 CONFIRMED 轨迹用专项模型补检 ──────────────
+            # 触发条件：step() 后 age > 0 说明该帧未被匹配
+            if self._rescue_model is not None and frame is not None:
+                unmatched = [t for t in self._tracker._tracks
+                             if t.state == TrackState.CONFIRMED and t.age > 0]
+                rescue_total += len(unmatched)
+                for t in unmatched:
+                    cx, cy = t.predicted_center
+                    rdet = _rescue_crop_detect(
+                        frame, cx, cy, self._rescue_model, self._rescue_conf)
+                    if rdet is None:
+                        continue
+                    rescue_hit += 1
+                    t.update(rdet, fi)
+                    result.append(dict(rdet,
+                                       track_id=t.id if t.state == TrackState.CONFIRMED else None,
+                                       _tid=t.id,
+                                       _rescue=True))
+
             tracked.append(result)
             if fi == debug_frame:
                 tr = self._tracker
@@ -509,6 +576,10 @@ class BallTracker:
                     print(f"           output: conf={det['conf']:.3f}"
                           f"  track_id={det.get('track_id')}"
                           f"  bbox={[round(v) for v in det['bbox']]}")
+
+        if self._rescue_model is not None:
+            print(f"[ rescue] triggered={rescue_total}  hit={rescue_hit}"
+                  + (f"  ({rescue_hit/rescue_total*100:.1f}%)" if rescue_total else ""))
 
         # ── 收集各 track_id 的检测点（含 TENTATIVE 回填）────────────────────
         tid_frames: dict[int, list] = {}
