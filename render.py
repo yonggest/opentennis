@@ -307,6 +307,12 @@ def _draw_frame(frame, fi, court_kps, H, pts_vol_bot, pts_vol_top,
         tid   = det.get('track_id')
         color = _ball_traj_color(tid) if tid is not None else _COLOR_BALL_NONE
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, thick)
+        if det.get('validated'):
+            cv2.putText(frame, '[V]', (x1, y1 - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, scale * 0.8, color, thick)
+        elif det.get('rescue'):
+            cv2.putText(frame, '[R]', (x1, y1 - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, scale * 0.8, color, thick)
 
     # 帧号
     cv2.putText(frame, str(fi), (margin, frame.shape[0] - margin),

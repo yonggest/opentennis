@@ -3,7 +3,7 @@
 视频标注浏览器 - 逐帧查看视频标注结果。
 
 用法:
-    python browse.py -v <视频文件> -j <COCO标注JSON>
+    python check_json.py <COCO标注JSON>
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 from court_detector import (compute_H_from_kps, COURT_LINES,
                              COURT_W as _COURT_W, NET_Y as _NET_Y)
-from PySide6.QtCore import Qt, QPointF, QRectF, QTimer
+from PySide6.QtCore import Qt, QEvent, QPointF, QRectF, QTimer
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QPolygonF,
 )
@@ -121,8 +121,8 @@ def load_annotations(json_path: Path) -> tuple[dict, dict, dict | None]:
             "track_id":     ann.get("track_id"),
             "valid":        ann.get("valid", True),
             "interpolated":   ann.get("interpolated", False),
-            "backward_found": ann.get("backward_found", False),
             "rescue":         ann.get("rescue", False),
+            "validated":      ann.get("validated", False),
         }
         if "foot" in ann:
             entry["foot"] = ann["foot"]
@@ -341,14 +341,16 @@ class BrowseApp(QMainWindow):
             item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.frame_list.addItem(item)
         self.frame_list.currentRowChanged.connect(self._on_list_select)
+        self.frame_list.installEventFilter(self)
 
         # Scene / View
         self.scene = QGraphicsScene()
         self.view  = FrameView(self.scene)
         self.view.setRenderHint(QPainter.Antialiasing)
         self.view.setBackgroundBrush(QBrush(QColor("#111111")))
-        self.view.setDragMode(QGraphicsView.NoDrag)
+        self.view.setDragMode(QGraphicsView.ScrollHandDrag)
         self.view.setFrameShape(QFrame.NoFrame)
+        self.view.installEventFilter(self)
 
         # 播放控件行
         ctrl = QWidget(); ctrl.setStyleSheet("background:#252526;")
@@ -506,14 +508,6 @@ class BrowseApp(QMainWindow):
         font_size = max(12, self._img_h // 80)
         font = QFont("Menlo", font_size)
 
-        # 计算每条轨迹的首个正向确认帧（非 backward 点的最小帧号），
-        # 用于 backward_found 检测框的因果性判断：确认前按未追踪样式显示
-        forward_start: dict[int, int] = {}
-        if self._ball_traj:
-            for tid, pts in self._ball_traj.items():
-                non_bwd = [p[0] for p in pts if not p[4]]
-                if non_bwd:
-                    forward_start[tid] = min(non_bwd)
         cur = self.current_frame
 
         anns_sorted = sorted(
@@ -527,8 +521,8 @@ class BrowseApp(QMainWindow):
             valid         = ann.get("valid", True)
             track_id      = ann.get("track_id")
             interpolated  = ann.get("interpolated", False)
-            backward_found = ann.get("backward_found", False)
             rescue        = ann.get("rescue", False)
+            validated     = ann.get("validated", False)
             is_ball       = cid in self.ball_cids
 
             # ── 颜色 / 样式判断 ───────────────────────────────────────────────
@@ -537,11 +531,6 @@ class BrowseApp(QMainWindow):
             #   非球 / 无 track_id   → 暗色 + X（原逻辑）
             if not valid:
                 if is_ball and track_id is not None:
-                    # 因果性检查：backward+interpolated 合成帧在确认前仍须隐藏
-                    if backward_found and interpolated:
-                        fwd_start = forward_start.get(track_id)
-                        if fwd_start is not None and cur < fwd_start:
-                            continue
                     color   = self._ball_traj_color(track_id)
                     special = "invalid_interp" if interpolated else "invalid"
                 else:
@@ -551,27 +540,6 @@ class BrowseApp(QMainWindow):
             elif is_ball and track_id is None and self._has_tracked:
                 color   = _BALL_UNTRACKED_COLOR
                 special = "untracked"
-            # 反向搜索找回的检测 / 反向插值帧
-            # 因果性原则：
-            #   确认前（cur < fwd_start）：
-            #     真实检测 → 按原来未追踪样式显示（暗色 + X）
-            #     合成插值帧 → 完全不显示（原本不存在）
-            #   确认后（cur >= fwd_start）：全部补全显示
-            #     真实检测 → 轨迹色 + X（backward 样式）
-            #     插值帧   → 轨迹色 + 虚线（interpolated 样式）
-            elif is_ball and backward_found:
-                fwd_start = forward_start.get(track_id)
-                if fwd_start is not None and cur < fwd_start:
-                    if interpolated:
-                        continue   # 合成帧确认前不存在，直接跳过
-                    color   = _BALL_UNTRACKED_COLOR
-                    special = "untracked"
-                elif interpolated:
-                    color   = self._ball_traj_color(track_id)
-                    special = "interpolated"
-                else:
-                    color   = self._ball_traj_color(track_id)
-                    special = "backward"
             # 正向插值帧 → 同 track_id 颜色 + 虚线
             elif is_ball and interpolated:
                 color   = self._ball_traj_color(track_id)
@@ -584,7 +552,7 @@ class BrowseApp(QMainWindow):
                 color   = self.category_colors.get(cid, QColor("white"))
                 special = None
 
-            pen = QPen(color, 1 if special in ("invalid", "invalid_interp", "untracked", "backward") else 2)
+            pen = QPen(color, 1 if special in ("invalid", "invalid_interp", "untracked") else 2)
             pen.setCosmetic(True)
             if special in ("interpolated", "invalid_interp"):
                 pen.setStyle(Qt.DashLine)
@@ -592,7 +560,7 @@ class BrowseApp(QMainWindow):
             box = self.scene.addRect(QRectF(x, y, w, h), pen, QBrush(Qt.NoBrush))
             box.setZValue(z + 1)
 
-            if special in ("invalid", "invalid_interp", "untracked", "backward"):
+            if special in ("invalid", "invalid_interp", "untracked"):
                 self.scene.addLine(x, y, x + w, y + h, pen).setZValue(z + 1)
                 self.scene.addLine(x + w, y, x, y + h, pen).setZValue(z + 1)
                 if special == "untracked":
@@ -616,6 +584,8 @@ class BrowseApp(QMainWindow):
                 label = f"{label} {score:.2f}"
             if special in ("interpolated", "invalid_interp"):
                 label = f"{label} ~"
+            if validated:
+                label = f"{label} [V]"
             if rescue:
                 label = f"{label} [R]"
 
@@ -758,11 +728,10 @@ class BrowseApp(QMainWindow):
         self.scene.addPolygon(right_poly, no_pen, mask_brush).setZValue(0.5)
 
     def _build_ball_trajectories(self) -> dict[int, list[tuple]]:
-        """返回 {track_id: [(frame_idx, cx, cy, ball_d_px, backward_found), ...]}。
+        """返回 {track_id: [(frame_idx, cx, cy, ball_d_px), ...]}。
 
         仅含已追踪（track_id != None）的网球标注。
         ball_d_px 为检测 bbox 均值宽高，用于计算透视自适应搜索半径。
-        backward_found 标记该点是否由反向搜索找回（渲染时用虚线区分）。
         """
         traj: dict[int, list] = {}
         for frame_idx, anns in self.frame_anns.items():
@@ -773,8 +742,7 @@ class BrowseApp(QMainWindow):
                 x, y, w, h = ann["bbox"]
                 cx, cy = x + w / 2, y + h / 2
                 ball_d_px = (w + h) / 2.0
-                backward = ann.get("backward_found", False)
-                traj.setdefault(tid, []).append((frame_idx, cx, cy, ball_d_px, backward))
+                traj.setdefault(tid, []).append((frame_idx, cx, cy, ball_d_px))
         for pts in traj.values():
             pts.sort(key=lambda t: t[0])
         return traj
@@ -844,34 +812,17 @@ class BrowseApp(QMainWindow):
         return _BALL_TRAJ_COLORS[track_id % len(_BALL_TRAJ_COLORS)]
 
     def _render_ball_trajectories(self):
-        """绘制当前帧及之前的网球轨迹线段。
-
-        反向搜索找回的线段（backward_found）用虚线绘制，正常追踪线段用实线。
-        时序规则：backward 段仅在当前帧 >= 轨迹首个正向确认帧时才显示，
-        模拟"反向补齐"在轨迹被确认后才回溯出现的效果。
-        """
+        """绘制当前帧及之前的网球轨迹线段。"""
         cur = self.current_frame
-
-        # 计算每条轨迹的首个正向确认帧（非 backward 的最小帧号）
-        forward_start: dict[int, int] = {}
-        for tid, pts in self._ball_traj.items():
-            non_bwd = [p[0] for p in pts if not p[4]]
-            if non_bwd:
-                forward_start[tid] = min(non_bwd)
 
         for tid, pts in self._ball_traj.items():
             color = self._ball_traj_color(tid)
-            fwd_start = forward_start.get(tid, 0)
             prev = None
-            for frame_idx, cx, cy, _, backward in pts:
+            for frame_idx, cx, cy, _ in pts:
                 if frame_idx > cur:
                     break
-                # backward 点：仅在轨迹已被正向确认后才显示
-                if backward and cur < fwd_start:
-                    prev = None   # 不与后续点相连
-                    continue
                 if prev is not None:
-                    pf, px, py, prev_backward = prev
+                    pf, px, py = prev
                     # 仅连接相邻帧，避免跨越长间隙时画长线
                     if frame_idx - pf <= self._ball_traj_max_age:
                         alpha = int(255 * max(0.2, 1.0 - (cur - frame_idx) / _BALL_TRAJ_FADE_FRAMES))
@@ -879,11 +830,8 @@ class BrowseApp(QMainWindow):
                         c.setAlpha(alpha)
                         p = QPen(c, 2)
                         p.setCosmetic(True)
-                        # 两端点任一为反向找回则用虚线
-                        if backward or prev_backward:
-                            p.setStyle(Qt.DashLine)
                         _add_arrowed_line(self.scene, px, py, cx, cy, p)
-                prev = (frame_idx, cx, cy, backward)
+                prev = (frame_idx, cx, cy)
 
     def _render_predictions(self):
         """为每条活动轨迹绘制预测曲线及下一帧搜索圆。
@@ -897,7 +845,7 @@ class BrowseApp(QMainWindow):
         cur = self.current_frame
 
         for tid, pts in self._ball_traj.items():
-            # 取当前帧及之前的检测点（5-tuple: frame_idx, cx, cy, ball_d_px, backward_found）
+            # 取当前帧及之前的检测点（4-tuple: frame_idx, cx, cy, ball_d_px）
             past = [p for p in pts if p[0] <= cur]
             if not past:
                 continue
@@ -1152,13 +1100,22 @@ class BrowseApp(QMainWindow):
 
     # ── 键盘 / 窗口事件 ───────────────────────────────────────────────────────
 
+    def eventFilter(self, obj, event):
+        """拦截 frame_list 和 view 的上下键，只做帧导航。"""
+        if obj in (self.frame_list, self.view) and event.type() == QEvent.KeyPress:
+            k = event.key()
+            if k == Qt.Key_Up:
+                self._step(-1)
+                return True
+            if k == Qt.Key_Down:
+                self._step(1)
+                return True
+        return super().eventFilter(obj, event)
+
     def keyPressEvent(self, event):
         k   = event.key()
         mod = event.modifiers()
 
-        if k == Qt.Key_Space and not event.isAutoRepeat():
-            self.view.setDragMode(QGraphicsView.ScrollHandDrag)
-            return
         if k == Qt.Key_P:
             self._toggle_play()
         elif k in (Qt.Key_Right, Qt.Key_Down):
@@ -1175,13 +1132,11 @@ class BrowseApp(QMainWindow):
             super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event):
-        if event.key() == Qt.Key_Space and not event.isAutoRepeat():
-            self.view.setDragMode(QGraphicsView.NoDrag)
-        else:
-            super().keyReleaseEvent(event)
+        super().keyReleaseEvent(event)
 
     def showEvent(self, event):
         super().showEvent(event)
+        self.view.setFocus()
         if not self._view_fitted and self.scene.items():
             self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
             self._view_fitted = True
@@ -1200,7 +1155,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
-            "  python browse.py detections.json\n"
+            "  python check_json.py detections.json\n"
         ),
     )
     parser.add_argument("json", metavar="JSON",

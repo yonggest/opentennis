@@ -80,7 +80,7 @@ def open_video_writer(path, fps, width, height):
 
 
 # ── COCO JSON 格式 ────────────────────────────────────────────────────────────
-# detect.py 保存、render.py 和 browse.py 读取的统一格式。
+# detect.py 保存、render.py 和 check_json.py 读取的统一格式。
 # 顶层结构：
 #   images       : [{id, width, height, frame_id}, ...]
 #   annotations  : [{id, image_id, category_id, bbox [x,y,w,h], area, iscrowd, score}, ...]
@@ -156,10 +156,10 @@ def save_coco(width, height, players, rackets, balls, path, fps=None, court=None
                     ann['track_id'] = det['track_id']
                 if det.get('interpolated'):
                     ann['interpolated'] = True
-                if det.get('backward_found'):
-                    ann['backward_found'] = True
                 if det.get('_rescue'):
                     ann['rescue'] = True
+                if det.get('validated'):
+                    ann['validated'] = True
                 if 'valid' in det:
                     ann['valid'] = det['valid']
                 if 'foot' in det:
@@ -244,10 +244,10 @@ def load_detections(path):
         }
         if ann.get('interpolated'):
             det['interpolated'] = True
-        if ann.get('backward_found'):
-            det['backward_found'] = True
         if ann.get('rescue'):
             det['rescue'] = True
+        if ann.get('validated'):
+            det['validated'] = True
         if 'foot' in ann:
             det['foot'] = ann['foot']
         if 'center' in ann:

@@ -21,21 +21,23 @@ import cv2
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-# rescue 推断裁图尺寸（与 yolo26n-ball.pt 训练 imgsz 一致）
-_RESCUE_PATCH = 96
+# 验证器裁图参数（与 yolo26n-ball.pt 训练 imgsz 一致）
+_RESCUE_PATCH      = 96   # rescue 裁图边长（px）
+_VALIDATOR_PADDING = 16   # 低置信度验证时在检测框四周额外添加的像素边距
+_VALIDATOR_IMGSZ   = 96   # 验证器推断尺寸
 
 
 # ── 物理常量 ──────────────────────────────────────────────────────────────────
 
 _BALL_D_M        = 0.067   # ITF 网球直径（m）
-_MAX_SPEED_MS    = 70.0    # 职业发球上限（m/s），用于 max_dist 兜底截断
+_MAX_SPEED_MS    = 41.7    # 最大球速上限 150 km/h（m/s），用于 max_dist 兜底截断
 _RADIUS_MARGIN   = 1.3     # max_dist 安全裕量系数
 _BBOX_MIN_FACTOR = 0.5     # min_area = (ball_d_px × 系数)²
 _BBOX_MAX_FACTOR = 15.0    # max_area = (ball_d_px × 系数)²
 _GAP_SECONDS      = 0.5    # max_age 对应时长（s）
 _MIN_HIT_SECONDS  = 0.05   # min_hits 对应时长（s）
-_SEARCH_DIAMETERS = 2.0    # 搜索半径 = N × 球径
-_LINEAR_WINDOW    = 4      # 预测时只使用最近 N 个历史点估计速度方向
+_SEARCH_DIAMETERS = 3.0    # 搜索半径 = N × 球径
+_LINEAR_WINDOW    = 3      # 预测时只使用最近 N 个历史点估计速度方向
 _HIST_BINS        = 16     # HSV H 通道直方图 bin 数
 _HIST_MOMENTUM    = 0.8    # 直方图 EMA 系数：新值权重 = 1 - momentum
 
@@ -407,7 +409,7 @@ class Tracker:
 # ── Rescue 辅助 ───────────────────────────────────────────────────────────────
 
 
-def _rescue_crop_detect(frame, cx, cy, model, conf_thr, fi, tid, save_dir=None):
+def _validate_crop(frame, cx, cy, model, conf_thr, fi, tid, save_dir=None):
     """以 (cx, cy) 为中心裁 _RESCUE_PATCH×_RESCUE_PATCH，用 model 检测网球。
 
     始终以极低置信度（0.01）提取所有候选并打印，然后返回置信度 >= conf_thr 的最高分
@@ -440,21 +442,14 @@ def _rescue_crop_detect(frame, cx, cy, model, conf_thr, fi, tid, save_dir=None):
     candidates_crop.sort(key=lambda x: -x[0])
     candidates_frame.sort(key=lambda x: -x[0])
 
-    # 打印最佳候选（无论是否达到阈值）
-    if candidates_frame:
-        c, x1, y1, x2, y2 = candidates_frame[0]
-        best_str = f"conf={c:.3f} bbox=[{round(x1)},{round(y1)},{round(x2)},{round(y2)}]"
-    else:
-        best_str = '(none)'
-    print(f"[ rescue] f{fi:05d}  tid={tid}  pred=({round(cx)},{round(cy)})"
-          f"  best: {best_str}")
-
     # 保存调试 patch 图（可选）
     if save_dir is not None:
         os.makedirs(save_dir, exist_ok=True)
         vis = crop.copy()
-        # 预测中心（蓝色十字）
-        cv2.drawMarker(vis, (half, half), (255, 100, 0),
+        # 预测中心在 patch 内的实际像素坐标（crop 被夹到边界时不再是正中心）
+        pred_px = int(round(cx)) - x0
+        pred_py = int(round(cy)) - y0
+        cv2.drawMarker(vis, (pred_px, pred_py), (255, 100, 0),
                        cv2.MARKER_CROSS, 12, 1, cv2.LINE_AA)
         # 最佳检测框（命中阈值→绿色，低置信→橙色，无检测→不画）
         if candidates_crop:
@@ -464,7 +459,7 @@ def _rescue_crop_detect(frame, cx, cy, model, conf_thr, fi, tid, save_dir=None):
             cv2.putText(vis, f"{bc:.2f}", (int(bx1), max(int(by1) - 2, 8)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1, cv2.LINE_AA)
         tag  = f"{candidates_crop[0][0]:.3f}" if candidates_crop else "none"
-        name = f"rescue_f{fi:05d}_tid{tid}_conf{tag}.jpg"
+        name = f"validate_f{fi:05d}_tid{tid}_conf{tag}.jpg"
         cv2.imwrite(os.path.join(save_dir, name), vis)
 
     # 返回置信度 >= conf_thr 的最高分检测（原图坐标）
@@ -490,7 +485,7 @@ class BallTracker:
                  conf_high=0.5, conf_low=0.1,
                  search_diameters=_SEARCH_DIAMETERS, max_dist=None,
                  min_area=20.0, max_area=8000.0, min_aspect=0.3,
-                 rescue_model=None, rescue_conf=0.5, rescue_save_dir=None):
+                 validator_model=None, validator_conf=0.5, validator_save_dir=None):
         self._tracker        = Tracker(min_hits=min_hits, max_age=max_age,
                                        conf_high=conf_high, conf_low=conf_low,
                                        search_diameters=search_diameters,
@@ -498,17 +493,17 @@ class BallTracker:
         self.min_area        = min_area
         self.max_area        = max_area
         self.min_aspect      = min_aspect
-        self._rescue_model   = rescue_model
-        self._rescue_conf    = rescue_conf
-        self._rescue_save_dir = rescue_save_dir
+        self._validator_model   = validator_model
+        self._validator_conf    = validator_conf
+        self._validator_save_dir = validator_save_dir
 
     @classmethod
     def from_video(cls, fps: float, px_per_meter: float,
                    conf_high: float = 0.5, conf_low: float = 0.1,
                    min_aspect: float = 0.3,
                    search_diameters: float = _SEARCH_DIAMETERS,
-                   rescue_model=None, rescue_conf: float = 0.5,
-                   rescue_save_dir=None):
+                   validator_model=None, validator_conf: float = 0.5,
+                   validator_save_dir=None):
         """
         根据帧率和像素/米比例推算各参数。
 
@@ -537,8 +532,8 @@ class BallTracker:
                    conf_high=conf_high, conf_low=conf_low,
                    search_diameters=search_diameters, max_dist=max_dist,
                    min_area=min_area, max_area=max_area, min_aspect=min_aspect,
-                   rescue_model=rescue_model, rescue_conf=rescue_conf,
-                   rescue_save_dir=rescue_save_dir)
+                   validator_model=validator_model, validator_conf=validator_conf,
+                   validator_save_dir=validator_save_dir)
 
     def run(self, ball_detections, debug_frame: int = -1, frames=None):
         """
@@ -575,30 +570,96 @@ class BallTracker:
         # ── 逐帧追踪 ─────────────────────────────────────────────────────────
         tracked = []
         frame_iter     = iter(frames) if frames is not None else None
-        rescue_total   = 0   # 累计触发 rescue 的（轨迹×帧）次数
-        rescue_hit     = 0   # 累计 rescue 成功次数
+        validate_total = 0   # 低置信度检测送入验证器次数
+        validate_hit   = 0   # 验证升级成功次数
+        validate_drop  = 0   # 验证失败丢弃次数
+        rescue_total   = 0   # 触发 rescue 的（轨迹×帧）次数
+        rescue_hit     = 0   # rescue 成功次数
 
         for fi, frame_dets in enumerate(candidates):
-            frame  = next(frame_iter) if frame_iter is not None else None
+            frame = next(frame_iter) if frame_iter is not None else None
+
+            # ── 预处理：验证低置信度检测（step 之前，清理重复/低质量检测）────
+            if frame is not None and self._validator_model is not None:
+                h, w = frame.shape[:2]
+                augmented = []
+                for det in frame_dets:
+                    if det['conf'] >= self._tracker.conf_high:
+                        augmented.append(det)
+                        continue
+                    validate_total += 1
+                    x1, y1, x2, y2 = det['bbox']
+                    cx1 = max(0, int(x1) - _VALIDATOR_PADDING)
+                    cy1 = max(0, int(y1) - _VALIDATOR_PADDING)
+                    cx2 = min(w, int(x2) + _VALIDATOR_PADDING)
+                    cy2 = min(h, int(y2) + _VALIDATOR_PADDING)
+                    crop = frame[cy1:cy2, cx1:cx2]
+                    if crop.size == 0:
+                        validate_drop += 1
+                        continue
+                    try:
+                        results = self._validator_model.predict(
+                            crop, imgsz=_VALIDATOR_IMGSZ, conf=0.01, verbose=False)
+                    except Exception:
+                        validate_drop += 1
+                        continue
+                    best = None
+                    for r in results:
+                        for box in r.boxes:
+                            c = float(box.conf)
+                            if best is None or c > best[0]:
+                                bx1, by1, bx2, by2 = box.xyxy[0].tolist()
+                                best = (c, bx1 + cx1, by1 + cy1, bx2 + cx1, by2 + cy1)
+                    if best and best[0] >= self._validator_conf:
+                        det['bbox']      = [best[1], best[2], best[3], best[4]]
+                        det['conf']      = best[0]
+                        det['validated'] = True
+                        # 若与已有框重叠（IoU > 0.3），保留置信度更高的，丢弃低的
+                        overlap_idx = next(
+                            (k for k, a in enumerate(augmented)
+                             if _iou(a['bbox'], det['bbox']) > 0.3),
+                            None)
+                        if overlap_idx is not None:
+                            if det['conf'] > augmented[overlap_idx]['conf']:
+                                augmented[overlap_idx] = det
+                            validate_drop += 1
+                        else:
+                            augmented.append(det)
+                            validate_hit += 1
+                    else:
+                        validate_drop += 1
+                frame_dets = augmented
+
             result = self._tracker.step(frame_dets, fi)
 
-            # ── Rescue：对未匹配的 CONFIRMED 轨迹用专项模型补检 ──────────────
-            # 触发条件：step() 后 age > 0 说明该帧未被匹配
-            if self._rescue_model is not None and frame is not None:
-                unmatched = [t for t in self._tracker._tracks
-                             if t.state == TrackState.CONFIRMED and t.age > 0]
-                rescue_total += len(unmatched)
-                for t in unmatched:
-                    cx, cy = t.predicted_center
-                    rdet = _rescue_crop_detect(
-                        frame, cx, cy, self._rescue_model, self._rescue_conf, fi, t.id,
-                        save_dir=self._rescue_save_dir)
-                    if rdet is None:
+            # ── Rescue：对未匹配的 CONFIRMED 轨迹在预测位置补检（step 之后）──
+            # step() 内已调用 predict()，predicted_center 是本帧的正确预测位置。
+            # claimed_centers：step() 中已被轨迹认领的检测中心
+            # rescue_centers ：本帧已 rescue 成功的位置，阻止重复 rescue 同一位置
+            if frame is not None and self._validator_model is not None:
+                rescue_radius   = _RESCUE_PATCH // 2
+                claimed_centers = [_center(d['bbox']) for d in result
+                                   if d.get('_tid') is not None]
+                rescue_centers  = []
+                for t in self._tracker._tracks:
+                    if t.state != TrackState.CONFIRMED or t.age == 0:
+                        continue  # age=0：本帧已匹配，无需 rescue
+                    tcx, tcy = t.predicted_center
+                    has_candidate = any(
+                        ((tcx - cx) ** 2 + (tcy - cy) ** 2) ** 0.5 <= rescue_radius
+                        for cx, cy in claimed_centers + rescue_centers
+                    )
+                    if has_candidate:
                         continue
-                    rescue_hit += 1
-                    t.update(rdet, fi)
-                    # 选出来的 t 本就是 CONFIRMED，update() 不会降级，track_id 直接用 t.id
-                    result.append(dict(rdet, track_id=t.id, _tid=t.id, _rescue=True))
+                    rescue_total += 1
+                    rdet = _validate_crop(
+                        frame, tcx, tcy, self._validator_model, self._validator_conf,
+                        fi, t.id, save_dir=self._validator_save_dir)
+                    if rdet is not None:
+                        rescue_centers.append(_center(rdet['bbox']))
+                        rescue_hit += 1
+                        t.update(rdet, fi)
+                        result.append(dict(rdet, track_id=t.id, _tid=t.id, _rescue=True))
 
             tracked.append(result)
             if fi == debug_frame:
@@ -620,8 +681,11 @@ class BallTracker:
                           f"  track_id={det.get('track_id')}"
                           f"  bbox={[round(v) for v in det['bbox']]}")
 
-        if self._rescue_model is not None:
-            print(f"[ rescue] triggered={rescue_total}  hit={rescue_hit}"
+        if self._validator_model is not None:
+            print(f"[validate] checked={validate_total}  upgraded={validate_hit}"
+                  f"  dropped={validate_drop}"
+                  + (f"  ({validate_hit/validate_total*100:.1f}%)" if validate_total else ""))
+            print(f"[ rescue ] attempts={rescue_total}  hit={rescue_hit}"
                   + (f"  ({rescue_hit/rescue_total*100:.1f}%)" if rescue_total else ""))
 
         # ── 收集各 track_id 的检测点（含 TENTATIVE 回填）────────────────────
@@ -645,92 +709,10 @@ class BallTracker:
             if prepend:
                 tid_frames[tid] = sorted(prepend + tid_frames[tid], key=lambda x: x[0])
 
-        # ── 反向搜索（轨迹头部延伸）──────────────────────────────────────────
-        # 轨迹 CONFIRMED 后，从起始帧向前反向外推，把之前未匹配的低置信度检测点找回来。
-        # 策略：用轨迹最早的几个点做线性拟合，向负方向外推；第一个未命中帧即停止，
-        # 避免把不相关的噪点拼入轨迹头部。
-
-        assigned_det_ids: set = set()
-        for frames in tid_frames.values():
-            for fi, det in frames:
-                assigned_det_ids.add(id(det))
-
-        for tid in list(tid_frames.keys()):
-            frames = tid_frames[tid]
-            if len(frames) < 2:
-                continue
-
-            # 用轨迹最早的若干点拟合速度（反向外推用）
-            n_pts = min(len(frames), _LINEAR_WINDOW)
-            early = frames[:n_pts]
-            ts = np.array([fi for fi, _ in early], dtype=float)
-            xs = np.array([_center(det['bbox'])[0] for _, det in early], dtype=float)
-            ys = np.array([_center(det['bbox'])[1] for _, det in early], dtype=float)
-            t0 = ts[0]
-            tn = ts - t0
-            deg = min(1, len(early) - 1)
-            px = np.polyfit(tn, xs, deg)
-            py = np.polyfit(tn, ys, deg)
-
-            # 搜索半径：用轨迹第一个检测的 bbox 尺寸
-            x1, y1, x2, y2 = frames[0][1]['bbox']
-            bbox_d = (x2 - x1 + y2 - y1) / 2.0
-            gate = self._tracker.search_diameters * bbox_d
-
-            fi_start = frames[0][0]
-            prepend = []
-            consecutive_misses = 0
-            _MAX_BACKWARD_GAP = 1   # 允许连续未命中帧数（跨 1 帧间隙）
-            for back in range(1, self._tracker.max_age + 1):
-                fi_back = fi_start - back
-                if fi_back < 0:
-                    break
-                tp = fi_back - t0   # 负偏移，反向外推
-                pred_x = float(np.polyval(px, tp))
-                pred_y = float(np.polyval(py, tp))
-
-                best_det, best_dist = None, gate
-                for det in candidates[fi_back]:
-                    if id(det) in assigned_det_ids:
-                        continue
-                    if det.get('conf', 1.0) < self._tracker.conf_low:
-                        continue
-                    cx, cy = _center(det['bbox'])
-                    dist = ((cx - pred_x) ** 2 + (cy - pred_y) ** 2) ** 0.5
-                    if dist < best_dist:
-                        best_dist, best_det = dist, det
-
-                if best_det is None:
-                    consecutive_misses += 1
-                    if consecutive_misses > _MAX_BACKWARD_GAP:
-                        break   # 连续未命中超过允许间隙，停止反向搜索
-                else:
-                    consecutive_misses = 0
-                    assigned_det_ids.add(id(best_det))
-                    best_det['_backward'] = True   # 标记为反向搜索找回，供输出时写入 backward_found 字段
-                    prepend.append((fi_back, best_det))
-
-            if prepend:
-                prepend.sort(key=lambda x: x[0])
-                tid_frames[tid] = prepend + tid_frames[tid]
-
-        # 反向找到的检测在 tracked 中有对应副本（track_id=None），需要防止重复写入 output。
-        # 用 (fi, bbox 四舍五入) 作为签名标记，在 untracked dump 时跳过匹配副本。
-        backward_sigs: set = set()
-        for frames in tid_frames.values():
-            for fi, det in frames:
-                if det.get('track_id') is None and not det.get('_tid'):
-                    # 原始 candidates 中的 det：没有 track_id 也没有 _tid
-                    bbox = det.get('bbox', [])
-                    if bbox:
-                        backward_sigs.add((fi, tuple(round(v) for v in bbox)))
-
         # ── Gap 线性插值，写入 output ─────────────────────────────────────────
         def _clean(det, **overrides):
-            d = {k: v for k, v in det.items() if k not in ('_tid', '_backward')}
+            d = {k: v for k, v in det.items() if k != '_tid'}
             d.update(overrides)
-            if det.get('_backward'):
-                d['backward_found'] = True
             return d
 
         output = [[] for _ in range(n)]
@@ -755,10 +737,6 @@ class BallTracker:
                             'bbox': [cx - w/2, cy - h/2, cx + w/2, cy + h/2],
                             'conf': 0.0, 'track_id': tid, 'interpolated': True,
                         }
-                        # 反向找回的检测与下一帧之间的插值帧也继承 backward_found，
-                        # 确保 browse.py 的因果性检查正确覆盖这段区间
-                        if det_a.get('_backward'):
-                            interp['backward_found'] = True
                         output[fi_a + t].append(interp)
             fi_last, det_last = frames[-1]
             output[fi_last].append(_clean(det_last, track_id=tid))
@@ -776,10 +754,6 @@ class BallTracker:
         for fi, frame_dets in enumerate(tracked):
             for det in frame_dets:
                 if det.get('track_id') is None and id(det) not in backfilled:
-                    bbox = det.get('bbox', [])
-                    sig = (fi, tuple(round(v) for v in bbox)) if bbox else None
-                    if sig and sig in backward_sigs:
-                        continue  # 反向搜索已将此检测归入轨迹，跳过重复写入
                     output[fi].append(_clean(det, track_id=None))
 
         n_raw     = sum(len(f) for f in ball_detections)

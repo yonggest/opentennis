@@ -21,7 +21,7 @@ from utils import load_detections, load_video_path, save_coco, iter_frames, prop
 from tracker import BallTracker, PlayerTracker, RacketTracker
 from court_detector import COURT_W as _COURT_W
 
-_VIDEO_EXTENSIONS    = ('.mp4', '.mov', '.avi', '.mkv', '.MP4', '.MOV', '.AVI', '.MKV')
+_VIDEO_EXTENSIONS     = ('.mp4', '.mov', '.avi', '.mkv', '.MP4', '.MOV', '.AVI', '.MKV')
 _SMOOTH_SIGMA_SECONDS = 0.1   # 轨迹平滑高斯核标准差（秒）
 
 
@@ -123,10 +123,10 @@ def parse_args():
     p.add_argument('-o', '--output',         default=None,        help='输出 JSON 路径（默认：输入同名加 _tracked）')
     p.add_argument('--conf-high',            type=float, default=0.5,  help='高置信度阈值：>= 此值的检测可新建轨迹')
     p.add_argument('--conf-low',             type=float, default=0.1,  help='低置信度下限：[low,high) 的检测仅续接已有轨迹')
-    p.add_argument('--search-diameters',     type=float, default=2.0,  help='球追踪搜索半径 = N × 球径（px）')
-    p.add_argument('--rescue-model',         default=None,             help='rescue 专项球检测模型路径（不传则不启用）')
-    p.add_argument('--rescue-conf',          type=float, default=0.5,  help='rescue 检测置信度阈值')
-    p.add_argument('--rescue-save-dir',      default=None,             help='调试：将每次 rescue 的 patch 图存入该目录')
+    p.add_argument('--search-diameters',     type=float, default=3.0,  help='球追踪搜索半径 = N × 球径（px）')
+    p.add_argument('--validator-model',       default=None,             help='验证器模型路径（不传则自动查找 models/yolo26n-ball.pt）')
+    p.add_argument('--validator-conf',       type=float, default=0.5,  help='验证器升级阈值：验证结果 >= 此值才替换原检测')
+    p.add_argument('--validator-save-dir',   default=None,             help='调试：将每次验证的 patch 图存入该目录')
     p.add_argument('--debug-frame',          type=int,   default=-1,   help='打印指定帧的追踪器内部状态（-1 关闭）')
     if len(sys.argv) == 1:
         p.print_help()
@@ -145,29 +145,29 @@ def main():
         stem = stem[:-len('.detected')]
     output_path = args.output or stem + '.tracked.json'
 
-    # 加载 rescue 模型（可选）
-    rescue_model = None
-    rescue_model_path = args.rescue_model or str(Path(__file__).parent / 'models/yolo26n-ball.pt')
-    if args.rescue_model or Path(rescue_model_path).exists():
-        if not Path(rescue_model_path).exists():
-            print(f"[ rescue] 警告：模型不存在 {rescue_model_path}，rescue 已禁用")
+    # 加载验证器模型（可选）
+    validator_model = None
+    validator_model_path = args.validator_model or str(Path(__file__).parent / 'models/yolo26n-ball.pt')
+    if args.validator_model or Path(validator_model_path).exists():
+        if not Path(validator_model_path).exists():
+            print(f"[validate] 警告：模型不存在 {validator_model_path}，验证已禁用")
         else:
-            from ultralytics import YOLO
+            from ultralytics import YOLO as _YOLO
             from ultralytics.utils import LOGGER as _ul_logger
             _prev_level = _ul_logger.level
             _ul_logger.setLevel(logging.WARNING)
-            rescue_model = YOLO(rescue_model_path, verbose=False)
+            validator_model = _YOLO(validator_model_path, verbose=False)
             _ul_logger.setLevel(_prev_level)
-            print(f"[ rescue] 已加载 {rescue_model_path}")
+            print(f"[validate] 已加载 {validator_model_path}")
 
     print("─" * 60)
     print(f"  input      {args.input}")
     print(f"  output     {output_path}")
     print(f"  conf       [{args.conf_low}, {args.conf_high})")
     print(f"  search     {args.search_diameters}× ball_d")
-    print(f"  rescue     {rescue_model_path if rescue_model else '禁用'}  conf={args.rescue_conf}")
-    if args.rescue_save_dir:
-        print(f"  rescue-dir {args.rescue_save_dir}")
+    print(f"  validator  {validator_model_path if validator_model else '禁用'}  conf={args.validator_conf}")
+    if args.validator_save_dir:
+        print(f"  val-dir    {args.validator_save_dir}")
     print("─" * 60, flush=True)
 
     fps, width, height, court, players, rackets, balls = load_detections(args.input)
@@ -201,13 +201,13 @@ def main():
     ).run(rackets)
     rackets = _smooth_racket_tracks(rackets, fps)
 
-    # 网球追踪：SORT 风格线性预测 + 反向头部延伸 + gap 插值
+    # 网球追踪：验证低置信度检测 + rescue 补检 + gap 插值（均在 BallTracker 内逐帧完成）
     balls = BallTracker.from_video(
         fps, ppm,
         conf_high=args.conf_high, conf_low=args.conf_low,
         search_diameters=args.search_diameters,
-        rescue_model=rescue_model, rescue_conf=args.rescue_conf,
-        rescue_save_dir=args.rescue_save_dir,
+        validator_model=validator_model, validator_conf=args.validator_conf,
+        validator_save_dir=args.validator_save_dir,
     ).run(balls, debug_frame=args.debug_frame,
           frames=iter_frames(video_path) if video_path else None)
 
