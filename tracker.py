@@ -556,6 +556,10 @@ class BallTracker:
                                        track_id=t.id if t.state == TrackState.CONFIRMED else None,
                                        _tid=t.id,
                                        _rescue=True))
+                    print(f"[ rescue] f{fi:05d}  tid={t.id}"
+                          f"  pred=({cx:.0f},{cy:.0f})"
+                          f"  bbox={[round(v) for v in rdet['bbox']]}"
+                          f"  conf={rdet['conf']:.3f}")
 
             tracked.append(result)
             if fi == debug_frame:
