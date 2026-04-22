@@ -576,7 +576,7 @@ class BallTracker:
         use_validator = frame_iter is not None and self._validator_model is not None
 
         # 统计计数器（仅在启用验证器时有意义）
-        val_checked  = 0   # 送入验证器的低置信度检测数
+        val_checked  = 0   # 送入验证器的检测数（高置信度 + 超低置信度两端）
         val_replaced = 0   # 验证器成功替换的检测数
         val_deduped  = 0   # 验证替换后因 IoU 重叠被去重的检测数
         rcl_tried    = 0   # 对未匹配 CONFIRMED 轨迹发起 recall 的次数
