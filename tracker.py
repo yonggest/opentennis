@@ -593,16 +593,16 @@ class BallTracker:
             if use_validator:
                 h, w = frame.shape[:2]
 
-                # ── 阶段二：验证器替换低置信度检测 ───────────────────────────
-                # 对每个低置信度检测，在其 bbox 附近运行验证器；
-                # 有结果则原地替换 bbox/conf（标记 validated=True），
-                # 无结果则保留原检测不变。
-                # 替换后的置信度由后续 step() 的 conf_high/conf_low 门限统一处理，
-                # 与不使用验证器时的追踪逻辑完全一致。
+                # ── 阶段二：验证器交叉检验 ──────────────────────────────────
+                # 只处理两端的检测，中间段 [conf_low, conf_high) 不做验证：
+                #   conf >= conf_high : 主检测器高置信，但验证器不认（< conf_high）→ 替换 + 报警
+                #   conf <  conf_low  : 主检测器几乎未检出，验证器发现球（> conf_low） → 替换 + 报警
                 any_replaced = False
                 for det in frame_dets:
-                    if det['conf'] >= self._tracker.conf_high:
-                        continue  # 高置信度：信任主检测器，跳过验证
+                    conf = det['conf']
+                    if self._tracker.conf_low <= conf < self._tracker.conf_high:
+                        continue  # 中间段不验证
+
                     val_checked += 1
                     x1, y1, x2, y2 = det['bbox']
                     cx1 = max(0, int(x1) - _VALIDATOR_PADDING)
@@ -624,12 +624,28 @@ class BallTracker:
                             if best is None or c > best[0]:
                                 bx1, by1, bx2, by2 = box.xyxy[0].tolist()
                                 best = (c, bx1 + cx1, by1 + cy1, bx2 + cx1, by2 + cy1)
-                    if best:
-                        det['bbox']      = [best[1], best[2], best[3], best[4]]
-                        det['conf']      = best[0]
-                        det['validated'] = True
-                        val_replaced    += 1
-                        any_replaced     = True
+                    if best is None:
+                        continue
+                    if conf >= self._tracker.conf_high:
+                        # 高置信度检测，但验证器置信度低 → 异常，替换并报警
+                        if best[0] < self._tracker.conf_high:
+                            det['bbox']      = [best[1], best[2], best[3], best[4]]
+                            det['conf']      = best[0]
+                            det['validated'] = True
+                            val_replaced    += 1
+                            any_replaced     = True
+                            print(f"\033[1;33m[validate] f{fi}  WARNING: high-conf {conf:.3f} "
+                                  f"→ validator {best[0]:.3f} (< {self._tracker.conf_high})  replaced\033[0m")
+                    else:  # conf < conf_low
+                        # 超低置信度检测，验证器确认为球 → 补救，替换并报警
+                        if best[0] > self._tracker.conf_low:
+                            det['bbox']      = [best[1], best[2], best[3], best[4]]
+                            det['conf']      = best[0]
+                            det['validated'] = True
+                            val_replaced    += 1
+                            any_replaced     = True
+                            print(f"\033[1;33m[validate] f{fi}  WARNING: low-conf {conf:.3f} "
+                                  f"→ validator {best[0]:.3f} (> {self._tracker.conf_low})  promoted\033[0m")
 
                 # 验证替换可能使某个低置信度检测的 bbox 与已有高置信度检测重叠，
                 # 产生重复框。仅在发生替换时做一次贪心 NMS 去重（按置信度降序保留）。
@@ -643,25 +659,43 @@ class BallTracker:
                     frame_dets = deduped
 
                 # ── 阶段三：Recall（找回缺失检测点）────────────────────────
-                # 对预测位置附近没有检测点的 CONFIRMED 轨迹，在预测位置运行验证器，
-                # 将找回的检测点直接加入本帧检测列表，参与后续 step() 的正常匹配。
-                # conf_low 门限与普通检测一致；occupied 防止同一位置被多次 recall。
-                recall_radius = _RECALL_PATCH // 2
-                occupied = [_center(d['bbox']) for d in frame_dets]
+                # 每条 CONFIRMED 轨迹在预测位置附近寻找检测点：
+                #   - effective_gate 内已有检测点（phase2 已验证）→ 无需 recall
+                #   - 未找到检测点 → 在预测位置运行验证器补检
+                # recall 结果若与已有检测点 IoU > 0.3，视为同一球，
+                # 不追加（已有检测点参与后续匹配），并打印提示。
                 for t in self._tracker._tracks:
                     if t.state != TrackState.CONFIRMED:
-                        continue  # 只对已确认轨迹 recall
+                        continue
                     tcx, tcy = t.predicted_center
                     # 预测位置附近已有检测点，无需 recall
-                    if any(((tcx - cx) ** 2 + (tcy - cy) ** 2) ** 0.5 <= recall_radius
-                           for cx, cy in occupied):
+                    if any(((tcx - _center(d['bbox'])[0])**2 +
+                            (tcy - _center(d['bbox'])[1])**2) ** 0.5 <= t.effective_gate
+                           for d in frame_dets):
                         continue
                     rcl_tried += 1
                     rdet = _validate_crop(
                         frame, tcx, tcy, self._validator_model,
                         fi, t.id, save_dir=self._validator_save_dir)
                     if rdet is not None and rdet['conf'] >= self._tracker.conf_low:
-                        occupied.append(_center(rdet['bbox']))
+                        overlap = next((d for d in frame_dets
+                                        if _iou(rdet['bbox'], d['bbox']) > 0.3), None)
+                        if overlap is not None:
+                            iou_val = _iou(rdet['bbox'], overlap['bbox'])
+                            print(f"[recall] f{fi} tid={t.id}  recall bbox={[round(v) for v in rdet['bbox']]} "
+                                  f"conf={rdet['conf']:.3f}  overlaps existing "
+                                  f"bbox={[round(v) for v in overlap['bbox']]} "
+                                  f"conf={overlap.get('conf', '?'):.3f}  "
+                                  f"iou={iou_val:.3f}  → 使用已有检测点")
+                            continue  # 已有检测点将参与 step() 匹配，无需追加
+                        # IoU <= 0.3 但仍有轻微重叠的情形：高亮提示
+                        near = next((d for d in frame_dets
+                                     if 0 < _iou(rdet['bbox'], d['bbox']) <= 0.3), None)
+                        if near is not None:
+                            print(f"\033[1;33m[recall] f{fi} tid={t.id}  WARNING: recall bbox overlaps "
+                                  f"existing bbox with low IoU={_iou(rdet['bbox'], near['bbox']):.3f} "
+                                  f"(< 0.3)  recall conf={rdet['conf']:.3f}  "
+                                  f"existing conf={near.get('conf', '?'):.3f}\033[0m")
                         rcl_found += 1
                         frame_dets.append(dict(rdet, _recall=True))
 
