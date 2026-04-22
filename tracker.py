@@ -22,7 +22,7 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 # 验证器裁图参数（与 yolo26n-ball.pt 训练 imgsz 一致）
-_RESCUE_PATCH      = 96   # rescue 裁图边长（px）
+_RECALL_PATCH      = 96   # recall 裁图边长（px）
 _VALIDATOR_PADDING = 16   # 低置信度验证时在检测框四周额外添加的像素边距
 _VALIDATOR_IMGSZ   = 96   # 验证器推断尺寸
 
@@ -34,7 +34,7 @@ _MAX_SPEED_MS    = 41.7    # 最大球速上限 150 km/h（m/s），用于 max_d
 _RADIUS_MARGIN   = 1.3     # max_dist 安全裕量系数
 _BBOX_MIN_FACTOR = 0.5     # min_area = (ball_d_px × 系数)²
 _BBOX_MAX_FACTOR = 15.0    # max_area = (ball_d_px × 系数)²
-_GAP_SECONDS      = 0.5    # max_age 对应时长（s）
+_GAP_SECONDS      = 0.25   # max_age 对应时长（s）
 _MIN_HIT_SECONDS  = 0.05   # min_hits 对应时长（s）
 _SEARCH_DIAMETERS = 3.0    # 搜索半径 = N × 球径
 _LINEAR_WINDOW    = 3      # 预测时只使用最近 N 个历史点估计速度方向
@@ -329,12 +329,18 @@ class Tracker:
         self._tracks = []
         _LinearTrack._next_id = 0
 
-    def step(self, detections, frame_idx):
+    def predict_all(self):
+        """对所有轨迹执行线性外推预测，更新 predicted_center 和 age。"""
+        for t in self._tracks:
+            t.predict()
+
+    def step(self, detections, frame_idx, skip_predict=False):
         """
         处理单帧检测（两阶段 ByteTrack 风格）。
 
-        输入 : detections = [{'bbox':[x1,y1,x2,y2], 'conf':float, ...}, ...]
-               frame_idx  = 当前帧号（int）
+        输入 : detections    = [{'bbox':[x1,y1,x2,y2], 'conf':float, ...}, ...]
+               frame_idx     = 当前帧号（int）
+               skip_predict  = True 时跳过预测步骤（由调用方提前调用 predict_all()）
         输出 : 同结构，每条检测新增两个字段：
                track_id — CONFIRMED 轨迹的 ID(int)；未确认或未匹配时为 None
                _tid     — 内部字段，含 TENTATIVE 轨迹的 ID；BallTracker.run() 用于
@@ -347,9 +353,9 @@ class Tracker:
         dets_high = [detections[i] for i in idx_high]
         dets_low  = [detections[i] for i in idx_low]
 
-        # 1. 预测
-        for t in self._tracks:
-            t.predict()
+        # 1. 预测（调用方已预测时跳过）
+        if not skip_predict:
+            self.predict_all()
 
         # 2. 阶段一：所有轨迹 vs 高置信度检测（逐轨迹门限）
         gates1 = [t.effective_gate for t in self._tracks]
@@ -362,7 +368,7 @@ class Tracker:
 
         # 3. 阶段二：阶段一未匹配的 CONFIRMED 轨迹 vs 低置信度检测（逐轨迹门限）
         # 仅 CONFIRMED 轨迹参与：TENTATIVE 轨迹不抢低置信度检测，防止"抢占"导致
-        # CONFIRMED 轨迹丢失检测点，进而触发 rescue 产生重复轨迹。
+        # CONFIRMED 轨迹丢失检测点，进而触发 recall 产生重复轨迹。
         matched2 = []
         if unmatched_t1 and dets_low:
             unmatched_t1_confirmed = [ti for ti in unmatched_t1
@@ -406,11 +412,11 @@ class Tracker:
                 for i, det in enumerate(detections)]
 
 
-# ── Rescue 辅助 ───────────────────────────────────────────────────────────────
+# ── Recall 辅助 ───────────────────────────────────────────────────────────────
 
 
-def _validate_crop(frame, cx, cy, model, conf_thr, fi, tid, save_dir=None):
-    """以 (cx, cy) 为中心裁 _RESCUE_PATCH×_RESCUE_PATCH，用 model 检测网球。
+def _validate_crop(frame, cx, cy, model, fi, tid, save_dir=None):
+    """以 (cx, cy) 为中心裁 _RECALL_PATCH×_RECALL_PATCH，用 model 检测网球。
 
     始终以极低置信度（0.01）提取所有候选并打印，然后返回置信度 >= conf_thr 的最高分
     检测（转换到原图坐标的 det dict）；若无则返回 None。
@@ -419,7 +425,7 @@ def _validate_crop(frame, cx, cy, model, conf_thr, fi, tid, save_dir=None):
     save_dir  不为 None 时，将 patch 图（叠加预测中心 + 检测框）存入该目录。
     """
     h, w = frame.shape[:2]
-    patch = _RESCUE_PATCH
+    patch = _RECALL_PATCH
     if w < patch or h < patch:
         return None
     half = patch // 2
@@ -451,21 +457,20 @@ def _validate_crop(frame, cx, cy, model, conf_thr, fi, tid, save_dir=None):
         pred_py = int(round(cy)) - y0
         cv2.drawMarker(vis, (pred_px, pred_py), (255, 100, 0),
                        cv2.MARKER_CROSS, 12, 1, cv2.LINE_AA)
-        # 最佳检测框（命中阈值→绿色，低置信→橙色，无检测→不画）
+        # 最佳检测框（有检测→绿色，无检测→不画）
         if candidates_crop:
             bc, bx1, by1, bx2, by2 = candidates_crop[0]
-            color = (0, 200, 0) if bc >= conf_thr else (0, 140, 255)
-            cv2.rectangle(vis, (int(bx1), int(by1)), (int(bx2), int(by2)), color, 1)
+            cv2.rectangle(vis, (int(bx1), int(by1)), (int(bx2), int(by2)), (0, 200, 0), 1)
             cv2.putText(vis, f"{bc:.2f}", (int(bx1), max(int(by1) - 2, 8)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1, cv2.LINE_AA)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 200, 0), 1, cv2.LINE_AA)
         tag  = f"{candidates_crop[0][0]:.3f}" if candidates_crop else "none"
         name = f"validate_f{fi:05d}_tid{tid}_conf{tag}.jpg"
         cv2.imwrite(os.path.join(save_dir, name), vis)
 
-    # 返回置信度 >= conf_thr 的最高分检测（原图坐标）
-    for c, x1, y1, x2, y2 in candidates_frame:
-        if c >= conf_thr:
-            return {'bbox': [x1, y1, x2, y2], 'conf': c}
+    # 返回置信度最高的检测（原图坐标），无检测则返回 None
+    if candidates_frame:
+        c, x1, y1, x2, y2 = candidates_frame[0]
+        return {'bbox': [x1, y1, x2, y2], 'conf': c}
     return None
 
 
@@ -485,7 +490,7 @@ class BallTracker:
                  conf_high=0.5, conf_low=0.1,
                  search_diameters=_SEARCH_DIAMETERS, max_dist=None,
                  min_area=20.0, max_area=8000.0, min_aspect=0.3,
-                 validator_model=None, validator_conf=0.5, validator_save_dir=None):
+                 validator_model=None, validator_save_dir=None):
         self._tracker        = Tracker(min_hits=min_hits, max_age=max_age,
                                        conf_high=conf_high, conf_low=conf_low,
                                        search_diameters=search_diameters,
@@ -493,8 +498,7 @@ class BallTracker:
         self.min_area        = min_area
         self.max_area        = max_area
         self.min_aspect      = min_aspect
-        self._validator_model   = validator_model
-        self._validator_conf    = validator_conf
+        self._validator_model    = validator_model
         self._validator_save_dir = validator_save_dir
 
     @classmethod
@@ -502,8 +506,7 @@ class BallTracker:
                    conf_high: float = 0.5, conf_low: float = 0.1,
                    min_aspect: float = 0.3,
                    search_diameters: float = _SEARCH_DIAMETERS,
-                   validator_model=None, validator_conf: float = 0.5,
-                   validator_save_dir=None):
+                   validator_model=None, validator_save_dir=None):
         """
         根据帧率和像素/米比例推算各参数。
 
@@ -532,7 +535,7 @@ class BallTracker:
                    conf_high=conf_high, conf_low=conf_low,
                    search_diameters=search_diameters, max_dist=max_dist,
                    min_area=min_area, max_area=max_area, min_aspect=min_aspect,
-                   validator_model=validator_model, validator_conf=validator_conf,
+                   validator_model=validator_model,
                    validator_save_dir=validator_save_dir)
 
     def run(self, ball_detections, debug_frame: int = -1, frames=None):
@@ -568,26 +571,39 @@ class BallTracker:
                           f"  asp={_aspect(d['bbox']):.2f}")
 
         # ── 逐帧追踪 ─────────────────────────────────────────────────────────
-        tracked = []
-        frame_iter     = iter(frames) if frames is not None else None
-        validate_total = 0   # 低置信度检测送入验证器次数
-        validate_hit   = 0   # 验证升级成功次数
-        validate_drop  = 0   # 验证失败丢弃次数
-        rescue_total   = 0   # 触发 rescue 的（轨迹×帧）次数
-        rescue_hit     = 0   # rescue 成功次数
+        tracked       = []
+        frame_iter    = iter(frames) if frames is not None else None
+        use_validator = frame_iter is not None and self._validator_model is not None
+
+        # 统计计数器（仅在启用验证器时有意义）
+        val_checked  = 0   # 送入验证器的低置信度检测数
+        val_replaced = 0   # 验证器成功替换的检测数
+        val_deduped  = 0   # 验证替换后因 IoU 重叠被去重的检测数
+        rcl_tried    = 0   # 对未匹配 CONFIRMED 轨迹发起 recall 的次数
+        rcl_found    = 0   # recall 成功找到网球的次数
 
         for fi, frame_dets in enumerate(candidates):
             frame = next(frame_iter) if frame_iter is not None else None
 
-            # ── 预处理：验证低置信度检测（step 之前，清理重复/低质量检测）────
-            if frame is not None and self._validator_model is not None:
+            # ── 阶段一：预测 ─────────────────────────────────────────────────
+            # 更新所有轨迹的预测位置（predicted_center）和 age。
+            # 须在验证替换和 Recall 之前完成，两者都依赖本帧预测位置。
+            self._tracker.predict_all()
+
+            if use_validator:
                 h, w = frame.shape[:2]
-                augmented = []
+
+                # ── 阶段二：验证器替换低置信度检测 ───────────────────────────
+                # 对每个低置信度检测，在其 bbox 附近运行验证器；
+                # 有结果则原地替换 bbox/conf（标记 validated=True），
+                # 无结果则保留原检测不变。
+                # 替换后的置信度由后续 step() 的 conf_high/conf_low 门限统一处理，
+                # 与不使用验证器时的追踪逻辑完全一致。
+                any_replaced = False
                 for det in frame_dets:
                     if det['conf'] >= self._tracker.conf_high:
-                        augmented.append(det)
-                        continue
-                    validate_total += 1
+                        continue  # 高置信度：信任主检测器，跳过验证
+                    val_checked += 1
                     x1, y1, x2, y2 = det['bbox']
                     cx1 = max(0, int(x1) - _VALIDATOR_PADDING)
                     cy1 = max(0, int(y1) - _VALIDATOR_PADDING)
@@ -595,13 +611,11 @@ class BallTracker:
                     cy2 = min(h, int(y2) + _VALIDATOR_PADDING)
                     crop = frame[cy1:cy2, cx1:cx2]
                     if crop.size == 0:
-                        validate_drop += 1
                         continue
                     try:
                         results = self._validator_model.predict(
                             crop, imgsz=_VALIDATOR_IMGSZ, conf=0.01, verbose=False)
                     except Exception:
-                        validate_drop += 1
                         continue
                     best = None
                     for r in results:
@@ -610,66 +624,63 @@ class BallTracker:
                             if best is None or c > best[0]:
                                 bx1, by1, bx2, by2 = box.xyxy[0].tolist()
                                 best = (c, bx1 + cx1, by1 + cy1, bx2 + cx1, by2 + cy1)
-                    if best and best[0] >= self._validator_conf:
+                    if best:
                         det['bbox']      = [best[1], best[2], best[3], best[4]]
                         det['conf']      = best[0]
                         det['validated'] = True
-                        # 若与已有框重叠（IoU > 0.3），保留置信度更高的，丢弃低的
-                        overlap_idx = next(
-                            (k for k, a in enumerate(augmented)
-                             if _iou(a['bbox'], det['bbox']) > 0.3),
-                            None)
-                        if overlap_idx is not None:
-                            if det['conf'] > augmented[overlap_idx]['conf']:
-                                augmented[overlap_idx] = det
-                            validate_drop += 1
+                        val_replaced    += 1
+                        any_replaced     = True
+
+                # 验证替换可能使某个低置信度检测的 bbox 与已有高置信度检测重叠，
+                # 产生重复框。仅在发生替换时做一次贪心 NMS 去重（按置信度降序保留）。
+                if any_replaced:
+                    deduped = []
+                    for det in sorted(frame_dets, key=lambda d: -d.get('conf', 0)):
+                        if not any(_iou(det['bbox'], k['bbox']) > 0.3 for k in deduped):
+                            deduped.append(det)
                         else:
-                            augmented.append(det)
-                            validate_hit += 1
-                    else:
-                        validate_drop += 1
-                frame_dets = augmented
+                            val_deduped += 1
+                    frame_dets = deduped
 
-            result = self._tracker.step(frame_dets, fi)
-
-            # ── Rescue：对未匹配的 CONFIRMED 轨迹在预测位置补检（step 之后）──
-            # step() 内已调用 predict()，predicted_center 是本帧的正确预测位置。
-            # claimed_centers：step() 中已被轨迹认领的检测中心
-            # rescue_centers ：本帧已 rescue 成功的位置，阻止重复 rescue 同一位置
-            if frame is not None and self._validator_model is not None:
-                rescue_radius   = _RESCUE_PATCH // 2
-                claimed_centers = [_center(d['bbox']) for d in result
-                                   if d.get('_tid') is not None]
-                rescue_centers  = []
+                # ── 阶段三：Recall（找回缺失检测点）────────────────────────
+                # 对预测位置附近没有检测点的 CONFIRMED 轨迹，在预测位置运行验证器，
+                # 将找回的检测点直接加入本帧检测列表，参与后续 step() 的正常匹配。
+                # conf_low 门限与普通检测一致；occupied 防止同一位置被多次 recall。
+                recall_radius = _RECALL_PATCH // 2
+                occupied = [_center(d['bbox']) for d in frame_dets]
                 for t in self._tracker._tracks:
-                    if t.state != TrackState.CONFIRMED or t.age == 0:
-                        continue  # age=0：本帧已匹配，无需 rescue
+                    if t.state != TrackState.CONFIRMED:
+                        continue  # 只对已确认轨迹 recall
                     tcx, tcy = t.predicted_center
-                    has_candidate = any(
-                        ((tcx - cx) ** 2 + (tcy - cy) ** 2) ** 0.5 <= rescue_radius
-                        for cx, cy in claimed_centers + rescue_centers
-                    )
-                    if has_candidate:
+                    # 预测位置附近已有检测点，无需 recall
+                    if any(((tcx - cx) ** 2 + (tcy - cy) ** 2) ** 0.5 <= recall_radius
+                           for cx, cy in occupied):
                         continue
-                    rescue_total += 1
+                    rcl_tried += 1
                     rdet = _validate_crop(
-                        frame, tcx, tcy, self._validator_model, self._validator_conf,
+                        frame, tcx, tcy, self._validator_model,
                         fi, t.id, save_dir=self._validator_save_dir)
-                    if rdet is not None:
-                        rescue_centers.append(_center(rdet['bbox']))
-                        rescue_hit += 1
-                        t.update(rdet, fi)
-                        result.append(dict(rdet, track_id=t.id, _tid=t.id, _rescue=True))
+                    if rdet is not None and rdet['conf'] >= self._tracker.conf_low:
+                        occupied.append(_center(rdet['bbox']))
+                        rcl_found += 1
+                        frame_dets.append(dict(rdet, _recall=True))
+
+            # ── 阶段四：追踪 ─────────────────────────────────────────────────
+            # 预测已在阶段一完成，skip_predict=True 避免重复预测。
+            # frame_dets 包含原始检测、验证替换结果及 recall 补检点，
+            # step() 按统一的 conf_high/conf_low 逻辑做匹配。
+            result = self._tracker.step(frame_dets, fi, skip_predict=True)
 
             tracked.append(result)
+
+            # ── 调试输出 ─────────────────────────────────────────────────────
             if fi == debug_frame:
                 tr = self._tracker
-                idx_high = [i for i, d in enumerate(frame_dets)
-                            if d.get('conf', 1.0) >= tr.conf_high]
-                idx_low  = [i for i, d in enumerate(frame_dets)
-                            if tr.conf_low <= d.get('conf', 1.0) < tr.conf_high]
-                print(f"[dbg f{fi}] conf split: high(>={tr.conf_high})={len(idx_high)}"
-                      f"  low([{tr.conf_low},{tr.conf_high}))={len(idx_low)}")
+                n_high = sum(1 for d in frame_dets if d.get('conf', 1.0) >= tr.conf_high)
+                n_low  = sum(1 for d in frame_dets
+                             if tr.conf_low <= d.get('conf', 1.0) < tr.conf_high)
+                print(f"[dbg f{fi}] conf split: high(>={tr.conf_high})={n_high}"
+                      f"  low([{tr.conf_low},{tr.conf_high}))={n_low}")
                 states = {0: 'TENTATIVE', 1: 'CONFIRMED', 2: 'LOST'}
                 for t in tr._tracks:
                     print(f"           track id={t.id}  {states[t.state]}"
@@ -681,12 +692,12 @@ class BallTracker:
                           f"  track_id={det.get('track_id')}"
                           f"  bbox={[round(v) for v in det['bbox']]}")
 
-        if self._validator_model is not None:
-            print(f"[validate] checked={validate_total}  upgraded={validate_hit}"
-                  f"  dropped={validate_drop}"
-                  + (f"  ({validate_hit/validate_total*100:.1f}%)" if validate_total else ""))
-            print(f"[ rescue ] attempts={rescue_total}  hit={rescue_hit}"
-                  + (f"  ({rescue_hit/rescue_total*100:.1f}%)" if rescue_total else ""))
+        if use_validator:
+            print(f"[validate] checked={val_checked}  replaced={val_replaced}"
+                  f"  deduped={val_deduped}"
+                  + (f"  ({val_replaced/val_checked*100:.1f}%)" if val_checked else ""))
+            print(f"[ recall ] tried={rcl_tried}  found={rcl_found}"
+                  + (f"  ({rcl_found/rcl_tried*100:.1f}%)" if rcl_tried else ""))
 
         # ── 收集各 track_id 的检测点（含 TENTATIVE 回填）────────────────────
         tid_frames: dict[int, list] = {}

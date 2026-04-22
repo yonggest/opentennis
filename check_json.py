@@ -45,7 +45,6 @@ _BALL_TRAJ_COLORS = [
     QColor("#00ffff"), QColor("#ff6400"), QColor("#b400ff"),
     QColor("#00ff64"), QColor("#ffc800"), QColor("#0064ff"),
 ]
-_BALL_UNTRACKED_COLOR = QColor("#804020")   # 未被 track 的网球（暗橙）
 _BALL_TRAJ_FADE_FRAMES = 60    # 轨迹淡出窗口（帧数）
 _PLAYER_TRAJ_COLORS = [
     QColor("#ff4444"), QColor("#44ff44"), QColor("#ffff44"), QColor("#ff44ff"),
@@ -121,7 +120,7 @@ def load_annotations(json_path: Path) -> tuple[dict, dict, dict | None]:
             "track_id":     ann.get("track_id"),
             "valid":        ann.get("valid", True),
             "interpolated":   ann.get("interpolated", False),
-            "rescue":         ann.get("rescue", False),
+            "recall":         ann.get("recall", False),
             "validated":      ann.get("validated", False),
         }
         if "foot" in ann:
@@ -184,14 +183,6 @@ class BrowseApp(QMainWindow):
                                  if "person" in name.lower()}
         self.racket_cids: set = {cid for cid, name in categories.items()
                                  if "racket" in name.lower()}
-        # 是否来自 track 阶段：有任意球标注的 track_id != None 则为 True
-        # detected JSON 中所有 track_id 均为 None，不应把 None 视为"被追踪器拒绝"
-        self._has_tracked: bool = any(
-            ann.get("track_id") is not None
-            for anns in frame_anns.values()
-            for ann in anns
-            if ann.get("category_id") in self.ball_cids
-        )
         # parse.py 之后的 JSON 会出现 valid=False 的标注；有 False 说明已过滤，不显示搜索圆
         self._has_parsed: bool = any(
             ann.get("valid") is False
@@ -521,7 +512,7 @@ class BrowseApp(QMainWindow):
             valid         = ann.get("valid", True)
             track_id      = ann.get("track_id")
             interpolated  = ann.get("interpolated", False)
-            rescue        = ann.get("rescue", False)
+            recall         = ann.get("recall", False)
             validated     = ann.get("validated", False)
             is_ball       = cid in self.ball_cids
 
@@ -536,10 +527,6 @@ class BrowseApp(QMainWindow):
                 else:
                     color   = self.category_dark_colors.get(cid, QColor("white"))
                     special = "invalid"
-            # track 阶段未追踪（track_id=None）→ 暗橙 + X（仅在 tracked JSON 中生效）
-            elif is_ball and track_id is None and self._has_tracked:
-                color   = _BALL_UNTRACKED_COLOR
-                special = "untracked"
             # 正向插值帧 → 同 track_id 颜色 + 虚线
             elif is_ball and interpolated:
                 color   = self._ball_traj_color(track_id)
@@ -552,7 +539,7 @@ class BrowseApp(QMainWindow):
                 color   = self.category_colors.get(cid, QColor("white"))
                 special = None
 
-            pen = QPen(color, 1 if special in ("invalid", "invalid_interp", "untracked") else 2)
+            pen = QPen(color, 1 if special in ("invalid", "invalid_interp") else 2)
             pen.setCosmetic(True)
             if special in ("interpolated", "invalid_interp"):
                 pen.setStyle(Qt.DashLine)
@@ -560,18 +547,9 @@ class BrowseApp(QMainWindow):
             box = self.scene.addRect(QRectF(x, y, w, h), pen, QBrush(Qt.NoBrush))
             box.setZValue(z + 1)
 
-            if special in ("invalid", "invalid_interp", "untracked"):
+            if special in ("invalid", "invalid_interp"):
                 self.scene.addLine(x, y, x + w, y + h, pen).setZValue(z + 1)
                 self.scene.addLine(x + w, y, x, y + h, pen).setZValue(z + 1)
-                if special == "untracked":
-                    score = ann.get("score")
-                    if score is not None:
-                        lbl = self.scene.addSimpleText(f"{score:.2f}", font)
-                        lbl.setBrush(QBrush(color))
-                        lbl.setPos(x, y - font_size * 1.4 if y >= font_size * 1.4 else y + h + 2)
-                        lbl.setZValue(len(anns_sorted) + z + 1)
-                if special not in ("invalid", "invalid_interp"):
-                    continue
 
             if cid in self.player_cids and track_id is not None:
                 label = f"P{track_id}"
@@ -586,7 +564,7 @@ class BrowseApp(QMainWindow):
                 label = f"{label} ~"
             if validated:
                 label = f"{label} [V]"
-            if rescue:
+            if recall:
                 label = f"{label} [R]"
 
             txt = self.scene.addSimpleText(label, font)

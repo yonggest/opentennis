@@ -310,7 +310,7 @@ def _draw_frame(frame, fi, court_kps, H, pts_vol_bot, pts_vol_top,
         if det.get('validated'):
             cv2.putText(frame, '[V]', (x1, y1 - 4),
                         cv2.FONT_HERSHEY_SIMPLEX, scale * 0.8, color, thick)
-        elif det.get('rescue'):
+        elif det.get('recall'):
             cv2.putText(frame, '[R]', (x1, y1 - 4),
                         cv2.FONT_HERSHEY_SIMPLEX, scale * 0.8, color, thick)
 

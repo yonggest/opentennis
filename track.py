@@ -124,8 +124,7 @@ def parse_args():
     p.add_argument('--conf-high',            type=float, default=0.5,  help='高置信度阈值：>= 此值的检测可新建轨迹')
     p.add_argument('--conf-low',             type=float, default=0.1,  help='低置信度下限：[low,high) 的检测仅续接已有轨迹')
     p.add_argument('--search-diameters',     type=float, default=3.0,  help='球追踪搜索半径 = N × 球径（px）')
-    p.add_argument('--validator-model',       default=None,             help='验证器模型路径（不传则自动查找 models/yolo26n-ball.pt）')
-    p.add_argument('--validator-conf',       type=float, default=0.5,  help='验证器升级阈值：验证结果 >= 此值才替换原检测')
+    p.add_argument('--validator-model',       default=None,             help='验证器模型路径；传入后启用验证器增强网球检测')
     p.add_argument('--validator-save-dir',   default=None,             help='调试：将每次验证的 patch 图存入该目录')
     p.add_argument('--debug-frame',          type=int,   default=-1,   help='打印指定帧的追踪器内部状态（-1 关闭）')
     if len(sys.argv) == 1:
@@ -145,27 +144,26 @@ def main():
         stem = stem[:-len('.detected')]
     output_path = args.output or stem + '.tracked.json'
 
-    # 加载验证器模型（可选）
+    # 加载验证器模型（可选，仅在显式传入 --validator-model 时启用）
     validator_model = None
-    validator_model_path = args.validator_model or str(Path(__file__).parent / 'models/yolo26n-ball.pt')
-    if args.validator_model or Path(validator_model_path).exists():
-        if not Path(validator_model_path).exists():
-            print(f"[validate] 警告：模型不存在 {validator_model_path}，验证已禁用")
+    if args.validator_model:
+        if not Path(args.validator_model).exists():
+            print(f"[validate] 警告：模型不存在 {args.validator_model}，验证已禁用")
         else:
             from ultralytics import YOLO as _YOLO
             from ultralytics.utils import LOGGER as _ul_logger
             _prev_level = _ul_logger.level
             _ul_logger.setLevel(logging.WARNING)
-            validator_model = _YOLO(validator_model_path, verbose=False)
+            validator_model = _YOLO(args.validator_model, verbose=False)
             _ul_logger.setLevel(_prev_level)
-            print(f"[validate] 已加载 {validator_model_path}")
+            print(f"[validate] 已加载 {args.validator_model}")
 
     print("─" * 60)
     print(f"  input      {args.input}")
     print(f"  output     {output_path}")
     print(f"  conf       [{args.conf_low}, {args.conf_high})")
     print(f"  search     {args.search_diameters}× ball_d")
-    print(f"  validator  {validator_model_path if validator_model else '禁用'}  conf={args.validator_conf}")
+    print(f"  validator  {args.validator_model if validator_model else '禁用'}")
     if args.validator_save_dir:
         print(f"  val-dir    {args.validator_save_dir}")
     print("─" * 60, flush=True)
@@ -201,15 +199,16 @@ def main():
     ).run(rackets)
     rackets = _smooth_racket_tracks(rackets, fps)
 
-    # 网球追踪：验证低置信度检测 + rescue 补检 + gap 插值（均在 BallTracker 内逐帧完成）
+    # 网球追踪：验证低置信度检测 + recall 找回 + gap 插值（均在 BallTracker 内逐帧完成）
+    # 无验证器时不需要读取视频帧
+    ball_frames = iter_frames(video_path) if (video_path and validator_model) else None
     balls = BallTracker.from_video(
         fps, ppm,
         conf_high=args.conf_high, conf_low=args.conf_low,
         search_diameters=args.search_diameters,
-        validator_model=validator_model, validator_conf=args.validator_conf,
+        validator_model=validator_model,
         validator_save_dir=args.validator_save_dir,
-    ).run(balls, debug_frame=args.debug_frame,
-          frames=iter_frames(video_path) if video_path else None)
+    ).run(balls, debug_frame=args.debug_frame, frames=ball_frames)
 
     save_coco(width, height, players, rackets, balls,
               output_path, fps=fps, court=court,
