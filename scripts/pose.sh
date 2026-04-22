@@ -8,7 +8,10 @@
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
-  echo "用法: bash pose.sh <输入.parsed.json|目录> <输出.posed.json|目录>" >&2
+  echo "" >&2
+  echo "% pose.sh input.parsed.json  out.posed.json" >&2
+  echo "% pose.sh parsed/            posed/" >&2
+  echo "" >&2
   exit 1
 fi
 

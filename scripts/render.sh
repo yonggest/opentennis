@@ -9,7 +9,10 @@
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
-  echo "用法: bash render.sh <输入.json|目录> <输出.mp4|目录>" >&2
+  echo "" >&2
+  echo "% render.sh input.parsed.json  out.mp4" >&2
+  echo "% render.sh jsons/             videos/" >&2
+  echo "" >&2
   exit 1
 fi
 

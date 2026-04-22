@@ -8,7 +8,10 @@
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
-  echo "用法: bash rally.sh <输入.posed.json|目录> <输出.rallies.json|目录>" >&2
+  echo "" >&2
+  echo "% rally.sh input.posed.json  out.rallies.json" >&2
+  echo "% rally.sh posed/            rallies/" >&2
+  echo "" >&2
   exit 1
 fi
 

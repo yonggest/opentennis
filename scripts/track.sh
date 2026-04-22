@@ -8,7 +8,10 @@
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
-  echo "用法: bash track.sh <输入.detected.json|目录> <输出.tracked.json|目录>" >&2
+  echo "" >&2
+  echo "% track.sh input.detected.json  out.tracked.json" >&2
+  echo "% track.sh detected/            tracked/" >&2
+  echo "" >&2
   exit 1
 fi
 

@@ -8,7 +8,10 @@
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
-  echo "用法: bash parse.sh <输入.tracked.json|目录> <输出.parsed.json|目录>" >&2
+  echo "" >&2
+  echo "% parse.sh input.tracked.json  out.parsed.json" >&2
+  echo "% parse.sh tracked/            parsed/" >&2
+  echo "" >&2
   exit 1
 fi
 
