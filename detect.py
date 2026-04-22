@@ -3,7 +3,7 @@
 
 用法：
     python detect.py -i <video>
-    python detect.py -i <video> -o results/my.json -m models/yolo26x.pt -s models/yolo26n-seg-tuned.pt
+    python detect.py -i <video> -o results/my.json -m models/yolo26x.pt -s models/yolo26n-seg-court.pt
 输出：
     <video>.detected.json（默认）或 -o 指定的路径
 """
@@ -32,7 +32,7 @@ def parse_args():
     p.add_argument('-i', '--input',        required=True,                help='输入视频路径')
     p.add_argument('-o', '--output',        default=None,                 help='输出 JSON 路径（默认：输入同名加 _detected）')
     p.add_argument('-m', '--object-model', default='models/yolo26x.pt',  help='物体检测模型路径（球员/球拍/球）')
-    p.add_argument('-s', '--court-model',  default='models/yolo26n-seg-tuned.pt', help='球场分割模型路径')
+    p.add_argument('-s', '--court-model',  default='models/yolo26n-seg-court.pt', help='球场分割模型路径')
     p.add_argument('-z', '--imgsz',        type=int,   default=1920,     help='推理图片尺寸')
     p.add_argument('-d', '--device',       default=None,                  help='推理设备：cpu / cuda / mps（默认自动）')
     if len(sys.argv) == 1:

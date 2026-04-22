@@ -44,7 +44,7 @@ if [[ "$(uname)" == "Darwin" ]]; then
 else
   OBJECT_MODEL="models/yolo26x.pt"
 fi
-COURT_MODEL="models/yolo26n-seg-tuned.pt"
+COURT_MODEL="models/yolo26n-seg-court.pt"
 
 # ── GPU 检测 ──────────────────────────────────────────────────────────────────
 GPUS=()
@@ -117,9 +117,11 @@ run_one() {
   echo "${prefix}── $(basename "$video")"
   echo "   → $out_json"
   if [[ -n "$gpu_label" ]]; then
+    echo -e "   \033[1;32m$\033[0m \033[1;33m.venv/bin/python detect.py\033[0m -i \"$video\" -o \"$out_json\" -m \"$OBJECT_MODEL\" -s \"$COURT_MODEL\""
     CUDA_VISIBLE_DEVICES="$gpu_label" .venv/bin/python detect.py \
       -i "$video" -o "$out_json" -m "$OBJECT_MODEL" -s "$COURT_MODEL"
   else
+    echo -e "   \033[1;32m$\033[0m \033[1;33m.venv/bin/python detect.py\033[0m -i \"$video\" -o \"$out_json\" -m \"$OBJECT_MODEL\" -s \"$COURT_MODEL\""
     .venv/bin/python detect.py \
       -i "$video" -o "$out_json" -m "$OBJECT_MODEL" -s "$COURT_MODEL"
   fi

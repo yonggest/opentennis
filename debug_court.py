@@ -22,7 +22,7 @@ from court_detector import (CourtDetector, MODEL_KPS_M, COURT_LINES,
 def parse_args():
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument('-i', '--input',  required=True, help='输入视频路径')
-    p.add_argument('-s', '--court-model', default='models/yolo26n-seg-tuned.pt', help='球场分割模型路径')
+    p.add_argument('-s', '--court-model', default='models/yolo26n-seg-court.pt', help='球场分割模型路径')
     if len(sys.argv) == 1:
         p.print_help()
         sys.exit(0)
