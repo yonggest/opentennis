@@ -171,21 +171,20 @@ def _ball_in_region(ann: dict, racket_anns: list,
 def _frame_matches(ball_anns: list, racket_anns: list,
                    filter_mode: str, region_poly=None,
                    conf_high: float = 0.5,
-                   sample_mode: str = 'both') -> bool:
+                   sample_mode: str = 'interpolated') -> bool:
     """判断当前帧中是否有目标网球落在目标空间区域。
 
     sample_mode 控制哪类球标注计入候选：
-      interpolated : 仅插值点（recall 补插，主检测器未检出）
-      low-conf     : 仅低置信度（score < conf_high）
-      both         : 两者都算
+      interpolated : 插值点（recall 补插，主检测器未检出）
+      low-conf     : 低置信度（score < conf_high）
+      high-conf    : 高置信度（score >= conf_high）
     """
     if sample_mode == 'interpolated':
         candidates = [a for a in ball_anns if a.get('interpolated')]
     elif sample_mode == 'low-conf':
         candidates = [a for a in ball_anns if a.get('score', 1.0) < conf_high]
-    else:  # both
-        candidates = [a for a in ball_anns
-                      if a.get('interpolated') or a.get('score', 1.0) < conf_high]
+    else:  # high-conf
+        candidates = [a for a in ball_anns if a.get('score', 0.0) >= conf_high]
     if not candidates:
         return False
     if filter_mode == 'all':
@@ -210,8 +209,8 @@ def _resolve_video(json_path: Path) -> Path:
 def extract_dataset(json_path: Path, out_dir: Path,
                     filter_mode: str, categories: list[str] | None,
                     conf_high: float = 0.5,
-                    sample_mode: str = 'both',
-                    max_frames: int = 100) -> None:
+                    sample_mode: str = 'interpolated',
+                    max_frames: int = 200) -> None:
     with open(json_path) as f:
         src = json.load(f)
 
@@ -270,11 +269,10 @@ def extract_dataset(json_path: Path, out_dir: Path,
         print("没有满足条件的帧，退出。")
         return
 
-    if len(kept_frame_ids) > max_frames:
-        kept_frame_ids = sorted(random.sample(kept_frame_ids, max_frames))
-        print(f"满足条件的帧超过上限，随机抽取 {max_frames} 帧")
-
-    print(f"提取帧数: {len(kept_frame_ids)} / {len(images_map)}")
+    total_matched = len(kept_frame_ids)
+    n = min(total_matched, max_frames)
+    kept_frame_ids = sorted(random.sample(kept_frame_ids, n))
+    print(f"随机抽取: {n} 帧 / 满足条件 {total_matched} 帧")
 
     # 定位视频
     video_path = _resolve_video(json_path)
@@ -383,11 +381,11 @@ def parse_args():
                         'backdrop=远端背景板  racket=球与球拍重叠')
     p.add_argument('--category', nargs='+', metavar='NAME',
                    help='输出标注的类别（如 "sports ball" "tennis racket"），不传则全部输出')
-    p.add_argument('--sample', default='both',
-                   choices=['interpolated', 'low-conf', 'both'],
-                   help='帧选择依据：interpolated=仅插值点  low-conf=仅低置信度  both=两者')
-    p.add_argument('--max-frames', type=int, default=100, metavar='N',
-                   help='最多提取帧数（默认 100），超出时随机抽取')
+    p.add_argument('--sample', default='interpolated',
+                   choices=['interpolated', 'low-conf', 'high-conf'],
+                   help='帧选择依据：interpolated=插值点  low-conf=低置信度  high-conf=高置信度')
+    p.add_argument('--num-frames', type=int, default=200, metavar='N',
+                   help='随机抽取帧数（默认 200），不足时取全部')
     if len(sys.argv) == 1:
         p.print_help()
         sys.exit(0)
@@ -408,13 +406,13 @@ def main():
     print(f"  output  {out_dir}")
     print(f"  position  {args.position}")
     print(f"  sample     {args.sample}")
-    print(f"  max-frames {args.max_frames}")
+    print(f"  num-frames {args.num_frames}")
     print(f"  category   {args.category or '(全部)'}")
     print("─" * 60, flush=True)
 
     try:
         extract_dataset(json_path, out_dir, args.position, args.category,
-                        sample_mode=args.sample, max_frames=args.max_frames)
+                        sample_mode=args.sample, max_frames=args.num_frames)
     except (FileNotFoundError, RuntimeError) as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

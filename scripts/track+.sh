@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# track.py 的便捷包装（不使用验证模型）。
+# track.py 的便捷包装（使用验证模型）。
 #
 # 用法:
-#   bash track.sh <输入.detected.json> <输出.tracked.json>   # 单文件
-#   bash track.sh <输入目录> <输出目录>                       # 批量
+#   bash track+.sh <输入.detected.json> <输出.tracked.json>   # 单文件
+#   bash track+.sh <输入目录> <输出目录>                       # 批量
 
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
   echo "" >&2
-  echo "% track.sh input.detected.json  out.tracked.json" >&2
-  echo "% track.sh detected/            tracked/" >&2
+  echo "% track+.sh input.detected.json  out.tracked.json" >&2
+  echo "% track+.sh detected/            tracked/" >&2
   echo "" >&2
   exit 1
 fi
@@ -53,9 +53,9 @@ for i in "${!in_list[@]}"; do
   echo ""
   echo "── $(basename "$in_json")"
   echo "   → $out_json"
-  echo -e "   \033[1;32m$\033[0m \033[1;33m.venv/bin/python track.py\033[0m -i \"$in_json\" -o \"$out_json\""
+  echo -e "   \033[1;32m$\033[0m \033[1;33m.venv/bin/python track.py\033[0m -i \"$in_json\" -o \"$out_json\" --validator-model models/yolo26n-ball.pt"
 
-  if .venv/bin/python track.py -i "$in_json" -o "$out_json"; then
+  if .venv/bin/python track.py -i "$in_json" -o "$out_json" --validator-model models/yolo26n-ball.pt; then
     ok=$((ok + 1))
   else
     echo "  [FAILED] $in_json" >&2
