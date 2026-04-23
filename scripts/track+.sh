@@ -53,9 +53,9 @@ for i in "${!in_list[@]}"; do
   echo ""
   echo "── $(basename "$in_json")"
   echo "   → $out_json"
-  echo -e "   \033[1;32m$\033[0m \033[1;33m.venv/bin/python track.py\033[0m -i \"$in_json\" -o \"$out_json\" --validator-model models/yolo26n-ball.pt"
+  echo -e "   \033[1;32m$\033[0m \033[1;33m.venv/bin/python track.py\033[0m -i \"$in_json\" -o \"$out_json\" --sub-model models/yolo26n-ball.pt"
 
-  if .venv/bin/python track.py -i "$in_json" -o "$out_json" --validator-model models/yolo26n-ball.pt; then
+  if .venv/bin/python track.py -i "$in_json" -o "$out_json" --sub-model models/yolo26n-ball.pt; then
     ok=$((ok + 1))
   else
     echo "  [FAILED] $in_json" >&2

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 从 tracked JSON 中提取验证器训练数据（四类样本）。
+# 从 tracked JSON 中提取次检测器训练数据（四类样本）。
 #
 # 输入：.tracked.json 文件
 # 输出：四个子目录，与输入文件同级
