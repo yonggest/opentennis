@@ -17,11 +17,6 @@ import cv2
 import numpy as np
 from court_detector import (compute_H_from_kps, COURT_LINES,
                              COURT_W as _COURT_W, NET_Y as _NET_Y)
-try:
-    from camera import build_3d_trajectories, eval_at_frame, project_3d
-    _CAMERA_OK = True
-except ImportError:
-    _CAMERA_OK = False
 from PySide6.QtCore import Qt, QEvent, QPointF, QRectF, QTimer
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QPolygonF,
@@ -158,6 +153,120 @@ class FrameView(QGraphicsView):
         self.scale(factor, factor)
 
 
+# ── 球场俯视图 ─────────────────────────────────────────────────────────────────
+
+class CourtMapWidget(QWidget):
+    """用 H_inv 把球/球员轨迹投影到球场坐标系，绘制俯视地图。"""
+
+    _COURT_W = 10.97
+    _COURT_L = 23.77
+    _TRAIL   = 90      # 轨迹保留帧数
+    _PAD     = 8       # 四周留白（像素）
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(200)
+        self.setSizePolicy(
+            self.sizePolicy().horizontalPolicy(),
+            __import__('PySide6.QtWidgets', fromlist=['QSizePolicy']).QSizePolicy.Expanding,
+        )
+        self.setStyleSheet("background:#0a1a0a;")
+        # 数据（由 BrowseApp 设置）
+        self._ball_pts: dict[int, list[tuple[int, float, float]]] = {}   # {tid: [(frame,X,Y)]}
+        self._player_pts: dict[int, list[tuple[int, float, float]]] = {} # {tid: [(frame,X,Y)]}
+        self._current_frame: int = 0
+        self._ball_colors: list[QColor] = _BALL_TRAJ_COLORS
+
+    def set_data(self,
+                 ball_pts: dict,
+                 player_pts: dict):
+        self._ball_pts   = ball_pts
+        self._player_pts = player_pts
+
+    def set_frame(self, frame_idx: int):
+        self._current_frame = frame_idx
+        self.update()
+
+    # ── 坐标转换：球场米 → widget 像素 ────────────────────────────────────────
+    def _to_px(self, X: float, Y: float, scale: float, ox: float, oy: float):
+        """球场 (X,Y) → widget 像素，Y=0 在上（远底线），Y=COURT_L 在下。"""
+        return ox + X * scale, oy + Y * scale
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+
+        W, H = self.width(), self.height()
+        pad  = self._PAD
+        avail_w = W - 2 * pad
+        avail_h = H - 2 * pad
+        scale = min(avail_w / self._COURT_W, avail_h / self._COURT_L)
+        cw = self._COURT_W * scale
+        ch = self._COURT_L * scale
+        ox = pad + (avail_w - cw) / 2
+        oy = pad + (avail_h - ch) / 2
+
+        # ── 球场背景 ──────────────────────────────────────────────────────────
+        p.fillRect(int(ox), int(oy), int(cw), int(ch), QColor("#1a3a1a"))
+
+        # ── 球场线条 ──────────────────────────────────────────────────────────
+        from court_detector import COURT_LINES, NET_Y
+        pen = QPen(QColor("#cccccc")); pen.setWidthF(0.8)
+        p.setPen(pen)
+        for (x1m, y1m), (x2m, y2m), _ in COURT_LINES:
+            px1, py1 = self._to_px(x1m, y1m, scale, ox, oy)
+            px2, py2 = self._to_px(x2m, y2m, scale, ox, oy)
+            p.drawLine(QPointF(px1, py1), QPointF(px2, py2))
+        # 网
+        net_pen = QPen(QColor("#888888")); net_pen.setWidthF(1.2)
+        p.setPen(net_pen)
+        nx1, ny1 = self._to_px(0, NET_Y, scale, ox, oy)
+        nx2, ny2 = self._to_px(self._COURT_W, NET_Y, scale, ox, oy)
+        p.drawLine(QPointF(nx1, ny1), QPointF(nx2, ny2))
+
+        cur = self._current_frame
+        trail = self._TRAIL
+
+        # ── 球员落点轨迹（小灰点）────────────────────────────────────────────
+        for tid, pts in self._player_pts.items():
+            col = _PLAYER_TRAJ_COLORS[tid % len(_PLAYER_TRAJ_COLORS)]
+            for fi, X, Y in pts:
+                age = cur - fi
+                if age < 0 or age > trail:
+                    continue
+                alpha = int(180 * (1 - age / trail))
+                c = QColor(col); c.setAlpha(alpha)
+                p.setBrush(QBrush(c)); p.setPen(Qt.NoPen)
+                px, py = self._to_px(X, Y, scale, ox, oy)
+                p.drawEllipse(QPointF(px, py), 2.0, 2.0)
+
+        # ── 球轨迹 ────────────────────────────────────────────────────────────
+        for tid, pts in self._ball_pts.items():
+            col = self._ball_colors[tid % len(self._ball_colors)]
+            cur_pt = None
+            for fi, X, Y in pts:
+                age = cur - fi
+                if age < 0 or age > trail:
+                    continue
+                alpha = int(220 * (1 - age / trail))
+                c = QColor(col); c.setAlpha(alpha)
+                p.setBrush(QBrush(c)); p.setPen(Qt.NoPen)
+                r = 2.5 if age > 0 else 5.0
+                px, py = self._to_px(X, Y, scale, ox, oy)
+                p.drawEllipse(QPointF(px, py), r, r)
+                if age == 0:
+                    cur_pt = (px, py, col)
+
+            # 当前帧：加白色外环
+            if cur_pt:
+                px, py, c = cur_pt
+                ring = QPen(QColor("#ffffff")); ring.setWidthF(1.2)
+                p.setPen(ring); p.setBrush(Qt.NoBrush)
+                p.drawEllipse(QPointF(px, py), 6.0, 6.0)
+
+        p.end()
+
+
 # ── 主窗口 ────────────────────────────────────────────────────────────────────
 
 class BrowseApp(QMainWindow):
@@ -199,11 +308,18 @@ class BrowseApp(QMainWindow):
         self.show_player_traj: bool = True
         self.show_racket_traj: bool = True
         self.show_pose: bool        = True
-        self.show_3d_traj: bool     = True
-        self._3d_traj: dict         = {}   # build_3d_trajectories() 的输出，延迟初始化
         self._ball_traj          = self._build_ball_trajectories()
         self._player_traj   = self._build_player_trajectories()
         self._racket_traj   = self._build_racket_trajectories()
+
+        # H_inv 投影：图像像素 → 球场坐标（Z=0 平面）
+        self._H_inv: np.ndarray | None = None
+        if court:
+            from court_detector import compute_H_from_kps
+            H = compute_H_from_kps(court['keypoints'])
+            self._H_inv = np.linalg.inv(H.astype(np.float64))
+        self._court_ball_pts   = self._build_court_ball_pts()
+        self._court_player_pts = self._build_court_player_pts()
 
         self.cap = cv2.VideoCapture(str(video_path))
         if not self.cap.isOpened():
@@ -227,9 +343,6 @@ class BrowseApp(QMainWindow):
 
         self._build_ui()
         self._goto_frame(0)
-        # _img_w/_img_h 已在 _goto_frame(0) 中设置，现在可以构建 3D 轨迹
-        if _CAMERA_OK and self.court:
-            self._init_3d_traj()
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
@@ -322,19 +435,6 @@ class BrowseApp(QMainWindow):
         self.pose_btn.clicked.connect(self._toggle_pose)
         tl.addWidget(self.pose_btn)
 
-        if _CAMERA_OK:
-            self.traj3d_btn = QPushButton("  3D重建  ")
-            self.traj3d_btn.setCheckable(True); self.traj3d_btn.setChecked(True)
-            self.traj3d_btn.setStyleSheet("""
-                QPushButton         { background:#2a2a2a; color:#666; border:none;
-                                      padding:4px 10px; font:11pt Menlo; }
-                QPushButton:checked { background:#2a0040; color:#ccc;
-                                      border:1px solid #cc44ff; }
-                QPushButton:hover   { background:#2a0040; color:white; }
-            """)
-            self.traj3d_btn.clicked.connect(self._toggle_3d_traj)
-            tl.addWidget(self.traj3d_btn)
-
         tl.addStretch()
         self.status_lbl = QLabel("", styleSheet="color:#4ec9b0; font:11pt Menlo;")
         tl.addWidget(self.status_lbl)
@@ -420,19 +520,32 @@ class BrowseApp(QMainWindow):
 
         # 右侧信息面板
         self.info_browser = QTextBrowser()
-        self.info_browser.setFixedWidth(210)
         self.info_browser.setReadOnly(True)
         self.info_browser.setOpenLinks(False)
         self.info_browser.setStyleSheet(
-            "QTextBrowser { background:#141414; border:none;"
-            " border-left:1px solid #2d2d2d; }"
+            "QTextBrowser { background:#141414; border:none; }"
         )
 
-        # 分割器：左=帧号列表，中=主视图，右=信息面板
+        # 球场俯视地图
+        self.court_map = CourtMapWidget()
+        self.court_map.set_data(self._court_ball_pts, self._court_player_pts)
+
+        # 右侧面板：信息 + 地图（竖向分割）
+        right_panel = QWidget()
+        rpl = QVBoxLayout(right_panel)
+        rpl.setContentsMargins(0, 0, 0, 0); rpl.setSpacing(0)
+        rpl.addWidget(self.info_browser, 1)
+        rpl.addWidget(self.court_map, 1)
+        right_panel.setFixedWidth(210)
+        right_panel.setStyleSheet(
+            "background:#141414; border-left:1px solid #2d2d2d;"
+        )
+
+        # 分割器：左=帧号列表，中=主视图，右=信息+地图面板
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self.frame_list)
         splitter.addWidget(right)
-        splitter.addWidget(self.info_browser)
+        splitter.addWidget(right_panel)
         splitter.setSizes([_LIST_W, 1060, 210])
         splitter.setHandleWidth(2)
         splitter.setStyleSheet("QSplitter::handle { background:#333; }")
@@ -463,6 +576,7 @@ class BrowseApp(QMainWindow):
             self.current_frame = idx
 
         self._redraw()
+        self.court_map.set_frame(self.current_frame)
 
         self.slider.blockSignals(True)
         self.slider.setValue(self.current_frame)
@@ -609,8 +723,6 @@ class BrowseApp(QMainWindow):
         if self.show_pose:
             self._render_skeletons(anns)
 
-        if self.show_3d_traj and self._3d_traj:
-            self._render_3d_trajectories()
 
         if self.show_court and self.court:
             self._render_court(font_size)
@@ -750,6 +862,41 @@ class BrowseApp(QMainWindow):
         for pts in traj.values():
             pts.sort(key=lambda t: t[0])
         return traj
+
+    def _project_to_court(self, u: float, v: float):
+        """用 H_inv 把图像像素投影到球场坐标（米），返回 (X, Y) 或 None。"""
+        if self._H_inv is None:
+            return None
+        pt = self._H_inv @ np.array([u, v, 1.0])
+        if abs(pt[2]) < 1e-9:
+            return None
+        return float(pt[0] / pt[2]), float(pt[1] / pt[2])
+
+    def _build_court_ball_pts(self) -> dict[int, list[tuple[int, float, float]]]:
+        """返回 {tid: [(frame, X, Y), ...]}，球的球场坐标（H_inv 投影）。"""
+        result: dict[int, list] = {}
+        for tid, pts in self._ball_traj.items():
+            court_pts = []
+            for fi, cx, cy, _ in pts:
+                xy = self._project_to_court(cx, cy)
+                if xy:
+                    court_pts.append((fi, xy[0], xy[1]))
+            if court_pts:
+                result[tid] = court_pts
+        return result
+
+    def _build_court_player_pts(self) -> dict[int, list[tuple[int, float, float]]]:
+        """返回 {tid: [(frame, X, Y), ...]}，球员脚步的球场坐标（H_inv 投影）。"""
+        result: dict[int, list] = {}
+        for tid, pts in self._player_traj.items():
+            court_pts = []
+            for fi, fx, fy in pts:
+                xy = self._project_to_court(fx, fy)
+                if xy:
+                    court_pts.append((fi, xy[0], xy[1]))
+            if court_pts:
+                result[tid] = court_pts
+        return result
 
     def _build_player_trajectories(self) -> dict[int, list[tuple[int, float, float]]]:
         """返回 {track_id: [(frame_idx, foot_x, foot_y), ...]}，仅含有效的、已追踪球员标注。
@@ -1003,140 +1150,6 @@ class BrowseApp(QMainWindow):
         self.show_court = not self.show_court
         self._redraw()
 
-    # ── 3D 轨迹 ───────────────────────────────────────────────────────────────
-
-    def _toggle_3d_traj(self):
-        self.show_3d_traj = not self.show_3d_traj
-        self._redraw()
-
-    def _init_3d_traj(self):
-        """初始化 3D 轨迹（在 _goto_frame(0) 之后调用，img 尺寸已知）。"""
-        kps = self.court.get("keypoints", []) if self.court else []
-        if not kps:
-            return
-        H = compute_H_from_kps(np.array(kps, dtype=np.float32).flatten())
-
-        # 只用非插值、valid 的真实检测帧，避免 tracker gap-fill 的假线性段
-        real_traj: dict[int, list] = {}
-        for fi, anns in self.frame_anns.items():
-            for ann in anns:
-                tid = ann.get("track_id")
-                if tid is None or ann.get("category_id") not in self.ball_cids:
-                    continue
-                if ann.get("interpolated", False):
-                    continue
-                if not ann.get("valid", True):
-                    continue
-                x, y, w, h = ann["bbox"]
-                real_traj.setdefault(tid, []).append(
-                    (fi, x + w / 2, y + h / 2, (w + h) / 2)
-                )
-        for pts in real_traj.values():
-            pts.sort()
-
-        if not real_traj:
-            return
-        try:
-            self._3d_traj = build_3d_trajectories(
-                real_traj, H, self.fps, self._img_w, self._img_h,
-            )
-            n_segs = sum(len(v['segments']) for v in self._3d_traj.values())
-            focal  = next(iter(self._3d_traj.values()))['focal_len'] if self._3d_traj else 0
-            print(f"[camera] 3D重建完成：{len(self._3d_traj)} 条轨迹，"
-                  f"{n_segs} 个弧段，f={focal:.0f} px")
-        except Exception as e:
-            print(f"[camera] 3D重建失败: {e}")
-
-    @staticmethod
-    def _z_to_color(z: float, z_max: float = 3.5) -> QColor:
-        """高度 Z（米）→ 颜色：蓝(0m) → 绿(1.5m) → 红(3.5m+)"""
-        t = max(0.0, min(1.0, z / z_max))
-        hue = int((1.0 - t) * 240)   # 240=蓝, 120=绿, 0=红
-        return QColor.fromHsv(hue, 230, 255)
-
-    def _render_3d_trajectories(self):
-        """
-        渲染 3D 拟合抛物线：
-          - 实线：拟合曲线（按高度 Z 着色）
-          - 虚线：拟合差（reproj_err > 阈值）
-          - 圆点：触地点（Z ≈ 0）
-        """
-        if not _CAMERA_OK or not self._3d_traj:
-            return
-        kps = self.court.get("keypoints", []) if self.court else []
-        if not kps:
-            return
-
-        H = compute_H_from_kps(np.array(kps, dtype=np.float32).flatten())
-        try:
-            from camera import recover_camera_from_H
-            _, P, _, _ = recover_camera_from_H(H, self._img_w, self._img_h)
-        except Exception:
-            return
-
-        cur  = self.current_frame
-        fade = _BALL_TRAJ_FADE_FRAMES
-        g    = 9.81
-        N_CURVE = 60   # 曲线采样点数
-
-        for tid, entry in self._3d_traj.items():
-            for seg in entry['segments']:
-                t0_frame = seg['t0_frame']
-                sf, ef   = seg['frame_range']
-                if ef < cur - fade or sf > cur:
-                    continue   # 不在当前视窗内，跳过
-
-                params = seg['params']
-                X0, Y0, Z0, vx, vy, vz = params
-                ok  = seg['success']
-
-                # 曲线只绘制从段起始到当前帧的部分（不绘制"未来"）
-                t_start = 0.0
-                t_end   = min((ef - t0_frame) / self.fps,
-                              (cur - t0_frame) / self.fps)
-                if t_end <= t_start:
-                    continue
-
-                t_eval = np.linspace(t_start, t_end, N_CURVE)
-                X = X0 + vx * t_eval
-                Y = Y0 + vy * t_eval
-                Z = np.maximum(0.0, Z0 + vz * t_eval - 0.5 * g * t_eval**2)
-                xyz = np.column_stack([X, Y, Z])
-
-                try:
-                    uv = project_3d(P, xyz)
-                except Exception:
-                    continue
-
-                # 绘制色彩线段
-                line_w = 3 if ok else 1
-                for i in range(N_CURVE - 1):
-                    t_age  = cur - (t0_frame + t_eval[i] * self.fps)
-                    alpha  = int(255 * max(0.15, 1.0 - t_age / fade))
-                    color  = self._z_to_color((Z[i] + Z[i+1]) / 2)
-                    color.setAlpha(alpha)
-                    pen = QPen(color, line_w)
-                    pen.setCosmetic(True)
-                    if not ok:
-                        pen.setStyle(Qt.DashLine)
-                    self.scene.addLine(
-                        float(uv[i, 0]),   float(uv[i, 1]),
-                        float(uv[i+1, 0]), float(uv[i+1, 1]),
-                        pen,
-                    ).setZValue(13)
-
-                # 触地点（Z=0 穿越）
-                for i in range(N_CURVE - 1):
-                    if Z[i] > 0.05 and Z[i+1] < 0.05:
-                        bx = float((uv[i, 0] + uv[i+1, 0]) / 2)
-                        by = float((uv[i, 1] + uv[i+1, 1]) / 2)
-                        r  = 6
-                        bounce_color = QColor("#ffffff"); bounce_color.setAlpha(200)
-                        self.scene.addEllipse(
-                            bx - r, by - r, r * 2, r * 2,
-                            QPen(bounce_color, 1),
-                            QBrush(bounce_color),
-                        ).setZValue(14)
 
     def _update_status(self):
         anns = self.frame_anns.get(self.current_frame, [])
@@ -1233,47 +1246,6 @@ class BrowseApp(QMainWindow):
             html_parts.append(row('网球', len(v_balls),   '', '#aaaaaa', _tids(v_balls)))
             html_parts.append(row('球员', len(v_persons), '', '#aaaaaa', _tids(v_persons)))
             html_parts.append(row('球拍', len(v_rackets), '', '#aaaaaa', _tids(v_rackets)))
-
-        # ── 3D 重建信息 ────────────────────────────────────────────────────────
-        if _CAMERA_OK and self._3d_traj:
-            focal_shown = False
-            for ann in v_balls:
-                tid = ann.get('track_id')
-                if tid is None or tid not in self._3d_traj:
-                    continue
-                result = eval_at_frame(self._3d_traj[tid], fi, self.fps)
-                if result is None:
-                    continue
-                X, Y, Z, speed_ms = result
-                # 找对应段的 reproj_err
-                seg_err = next(
-                    (s['reproj_err'] for s in self._3d_traj[tid]['segments']
-                     if s['frame_range'][0] <= fi <= s['frame_range'][1]),
-                    None,
-                )
-                if not focal_shown:
-                    focal = self._3d_traj[tid]['focal_len']
-                    html_parts.append(sep)
-                    html_parts.append(
-                        f'<tr><td colspan="3" style="color:{HDR}; font-size:9pt; padding:2px 0 3px 0;">'
-                        f'3D 重建  <span style="color:{DIM}">f={focal:.0f}px</span></td></tr>')
-                    focal_shown = True
-                err_color = '#4ec9b0' if (seg_err is not None and seg_err < 5) else \
-                            '#ffaa33' if (seg_err is not None and seg_err < 12) else '#ff5555'
-                err_str = f'{seg_err:.1f}px' if seg_err is not None else '—'
-                speed_kmh = speed_ms * 3.6
-                html_parts.append(
-                    f'<tr><td style="color:{HDR}; padding:1px 4px 1px 0;">#{tid} 高度</td>'
-                    f'<td style="color:#cccccc; padding:1px 6px; text-align:right;">{Z:.2f} m</td>'
-                    f'<td></td></tr>')
-                html_parts.append(
-                    f'<tr><td style="color:{HDR}; padding:1px 4px 1px 0;">速度</td>'
-                    f'<td style="color:#cccccc; padding:1px 6px; text-align:right;">{speed_kmh:.0f} km/h</td>'
-                    f'<td></td></tr>')
-                html_parts.append(
-                    f'<tr><td style="color:{HDR}; padding:1px 4px 1px 0;">投影误差</td>'
-                    f'<td style="color:{err_color}; padding:1px 6px; text-align:right;">{err_str}</td>'
-                    f'<td></td></tr>')
 
         html_parts.append('</table></body></html>')
         self.info_browser.setHtml(''.join(html_parts))
