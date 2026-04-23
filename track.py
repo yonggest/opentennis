@@ -122,7 +122,7 @@ def parse_args():
     p.add_argument('-i', '--input',          required=True,       help='detect.py 输出的 JSON 路径')
     p.add_argument('-o', '--output',         default=None,        help='输出 JSON 路径（默认：输入同名加 _tracked）')
     p.add_argument('--conf-high',            type=float, default=0.5,  help='高置信度阈值：>= 此值的检测可新建轨迹')
-    p.add_argument('--conf-low',             type=float, default=0.1,  help='低置信度下限：[low,high) 的检测仅续接已有轨迹')
+    p.add_argument('--conf-low',             type=float, default=0.0,  help='低置信度下限：[low,high) 的检测仅续接已有轨迹')
     p.add_argument('--search-diameters',     type=float, default=3.0,  help='球追踪搜索半径 = N × 球径（px）')
     p.add_argument('--sub-model',            default=None,             help='次检测器模型路径；传入后启用次检测器进行 recall 补检')
     p.add_argument('--sub-save-dir',         default=None,             help='调试：将每次 recall 的 patch 图存入该目录')

@@ -173,15 +173,11 @@ class CourtMapWidget(QWidget):
         self.setStyleSheet("background:#0a1a0a;")
         # 数据（由 BrowseApp 设置）
         self._ball_pts: dict[int, list[tuple[int, float, float]]] = {}   # {tid: [(frame,X,Y)]}
-        self._player_pts: dict[int, list[tuple[int, float, float]]] = {} # {tid: [(frame,X,Y)]}
         self._current_frame: int = 0
         self._ball_colors: list[QColor] = _BALL_TRAJ_COLORS
 
-    def set_data(self,
-                 ball_pts: dict,
-                 player_pts: dict):
-        self._ball_pts   = ball_pts
-        self._player_pts = player_pts
+    def set_data(self, ball_pts: dict):
+        self._ball_pts = ball_pts
 
     def set_frame(self, frame_idx: int):
         self._current_frame = frame_idx
@@ -226,19 +222,6 @@ class CourtMapWidget(QWidget):
 
         cur = self._current_frame
         trail = self._TRAIL
-
-        # ── 球员落点轨迹（小灰点）────────────────────────────────────────────
-        for tid, pts in self._player_pts.items():
-            col = _PLAYER_TRAJ_COLORS[tid % len(_PLAYER_TRAJ_COLORS)]
-            for fi, X, Y in pts:
-                age = cur - fi
-                if age < 0 or age > trail:
-                    continue
-                alpha = int(180 * (1 - age / trail))
-                c = QColor(col); c.setAlpha(alpha)
-                p.setBrush(QBrush(c)); p.setPen(Qt.NoPen)
-                px, py = self._to_px(X, Y, scale, ox, oy)
-                p.drawEllipse(QPointF(px, py), 2.0, 2.0)
 
         # ── 球轨迹 ────────────────────────────────────────────────────────────
         for tid, pts in self._ball_pts.items():
@@ -318,8 +301,7 @@ class BrowseApp(QMainWindow):
             from court_detector import compute_H_from_kps
             H = compute_H_from_kps(court['keypoints'])
             self._H_inv = np.linalg.inv(H.astype(np.float64))
-        self._court_ball_pts   = self._build_court_ball_pts()
-        self._court_player_pts = self._build_court_player_pts()
+        self._court_ball_pts = self._build_court_ball_pts()
 
         self.cap = cv2.VideoCapture(str(video_path))
         if not self.cap.isOpened():
@@ -528,7 +510,7 @@ class BrowseApp(QMainWindow):
 
         # 球场俯视地图
         self.court_map = CourtMapWidget()
-        self.court_map.set_data(self._court_ball_pts, self._court_player_pts)
+        self.court_map.set_data(self._court_ball_pts)
 
         # 右侧面板：信息 + 地图（竖向分割）
         right_panel = QWidget()
@@ -879,19 +861,6 @@ class BrowseApp(QMainWindow):
             court_pts = []
             for fi, cx, cy, _ in pts:
                 xy = self._project_to_court(cx, cy)
-                if xy:
-                    court_pts.append((fi, xy[0], xy[1]))
-            if court_pts:
-                result[tid] = court_pts
-        return result
-
-    def _build_court_player_pts(self) -> dict[int, list[tuple[int, float, float]]]:
-        """返回 {tid: [(frame, X, Y), ...]}，球员脚步的球场坐标（H_inv 投影）。"""
-        result: dict[int, list] = {}
-        for tid, pts in self._player_traj.items():
-            court_pts = []
-            for fi, fx, fy in pts:
-                xy = self._project_to_court(fx, fy)
                 if xy:
                     court_pts.append((fi, xy[0], xy[1]))
             if court_pts:

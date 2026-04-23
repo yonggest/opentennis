@@ -90,7 +90,7 @@ def _filter_rackets(rackets, volume_hull, valid_players):
     按 track_id 分组，轨迹中 >50% 的帧同时满足以下两个条件才有效：
     1. bbox 与立体缓冲区（volume hull）有交叠；
     2. bbox 与当前帧至少一个有效球员的 bbox 有交叠。
-    无 track_id 的检测逐帧判断。
+    无 track_id 的检测直接移除。
     """
     # 统计每条轨迹的有效帧比例
     track_total: dict = defaultdict(int)
@@ -117,12 +117,8 @@ def _filter_rackets(rackets, volume_hull, valid_players):
         for d in frame:
             tid = d.get('track_id')
             if tid is None:
-                # 无轨迹：逐帧判断
-                in_volume  = _bbox_overlaps_hull(volume_hull, *d['bbox'])
-                has_player = any(_bboxes_overlap(d['bbox'], p['bbox']) for p in players)
-                (k if in_volume and has_player else r).append(d)
-            else:
-                (r if tid in invalid_tracks else k).append(d)
+                continue   # 无 track_id：直接丢弃
+            (r if tid in invalid_tracks else k).append(d)
         kept.append(k)
         removed.append(r)
     return kept, removed
@@ -166,13 +162,8 @@ def _filter_balls(balls, volume_hull, fps=25.0):
     运动轨迹从未进入 volume_hull → 整条轨迹无效（场外球，含发球后未入场的噪点）。
     曾运动后停止的球保持有效（不再超时淘汰）。
 
-    track_id 处理：
-    - 来自 track.py：track_id=None 的检测直接移除。
-    - 来自 detect.py（所有 track_id 均为 None）：逐帧按 volume_hull 过滤。
+    无 track_id 的检测直接移除。
     """
-    has_tracked = any(d.get('track_id') is not None
-                      for frame in balls for d in frame)
-
     # 收集每条轨迹的图像坐标，只用真实检测点（不含插值）
     track_pts = defaultdict(list)
     for fi, frame in enumerate(balls):
@@ -207,13 +198,8 @@ def _filter_balls(balls, volume_hull, fps=25.0):
             tid = d.get('track_id')
             cx  = (d['bbox'][0] + d['bbox'][2]) / 2
             cy  = (d['bbox'][1] + d['bbox'][3]) / 2
-            if tid in invalid_tracks:
+            if tid is None or tid in invalid_tracks:
                 r.append(d)
-            elif tid is None:
-                if has_tracked:
-                    r.append(d)
-                else:
-                    (k if _in_hull(volume_hull, cx, cy) else r).append(d)
             else:
                 k.append(d)
         kept.append(k)

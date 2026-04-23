@@ -38,11 +38,14 @@ python3.10 -m venv .venv
 ## Training & Evaluation
 
 ```bash
-# Fine-tune
-.venv/bin/python train_detect.py --data datasets/xxx-yolo/data.yaml --name finetune
+# Fine-tune ball detector
+.venv/bin/python train_ball.py --data datasets/xxx-yolo/data.yaml --name finetune
 
-# Evaluate
-.venv/bin/python eval_detect.py --data datasets/xxx-yolo/data.yaml
+# Fine-tune court detector
+.venv/bin/python train_court.py --data datasets/xxx-court/data.yaml --name finetune
+
+# Evaluate ball detector
+.venv/bin/python eval_ball.py --data datasets/xxx-yolo/data.yaml
 ```
 
 - Training outputs to `runs/{task}/exp/<name>/` under the project root (absolute path, not affected by ultralytics global `runs_dir` setting)
@@ -65,11 +68,11 @@ track.py
 
 parse.py
   → _filter_players/rackets/balls()    — spatial filtering by clearance hulls
-  → save_coco() with valid             → <video>_parsed.json
+  → save_coco() (only valid dets)      → <video>_parsed.json
 
 render.py
   → load_detections()                  — reads any stage JSON
-  → split valid/invalid per frame
+  → split valid/invalid per frame      — (valid defaults to true when absent)
   → draw: court lines + volume wireframe + outside wall masks → valid boxes → invalid boxes (dark+X) → ball trajectories
   → ffmpeg H.264 encoding              → <output>.mp4
 ```
@@ -79,10 +82,10 @@ render.py
 - **Unified JSON format:** all stages share the same COCO schema. track.py adds `track_id` (int|null); parse.py adds `valid` (bool). render.py reads any stage; `track_id` defaults to null and `valid` defaults to true when absent.
 - **Single inference:** `model.predict()` (not `model.track()`) with `classes=[0, 38, 32]`. `track()` was abandoned because ByteTrack drops unconfirmed detections (box.id=None), causing ball loss.
 - **Court keypoints** detected only on frame 0 — the court doesn't move.
-- **Clearance volume:** ITF standard / 2 — back 3.20 m, side 1.83 m, height 2.0 m. Projected as wireframe in render/browse. Players filtered by ground hull (bottom-center inside), rackets by volume hull (5-point bbox check), balls by side-wall quads + static threshold (avg displacement < 5 px).
+- **Clearance volume:** ITF standard / 2 — back 3.20 m, side 1.83 m, height 2.0 m. Projected as wireframe in render/check_json. Players filtered by ground hull (bottom-center inside), rackets by volume hull (5-point bbox check), balls by side-wall quads + static threshold (avg displacement < 5 px).
 - **Side wall filtering (balls):** Moving ball trajectories are invalidated if the start point falls inside the left or right wall quadrilateral — each wall is the volume side face (`vol_bottom_pts` + `vol_top_pts`) extended to sky via the vertical edge direction. Using the wall face quad (not the full volume hull) avoids false negatives for airborne balls, and extending to sky avoids false negatives from the 2 m height cap. Static balls still use volume hull per-frame.
-- **Outside wall masks:** render.py and browse.py draw a semi-transparent dark overlay outside the two side walls. The mask boundary follows the far-left/far-right vertical edge of the volume (bottom → 2 m top → sky), creating a wall-like appearance rather than a flat curtain.
-- **Invalid detections** are kept in the JSON (`valid=false`) and shown in dark color + X in render/browse.
+- **Outside wall masks:** render.py and check_json.py draw a semi-transparent dark overlay outside the two side walls. The mask boundary follows the far-left/far-right vertical edge of the volume (bottom → 2 m top → sky), creating a wall-like appearance rather than a flat curtain.
+- **parse.py output** contains only valid detections (invalid ones are discarded). render.py handles both: if a stage JSON includes `valid=false` annotations, they are rendered dark+X; when `valid` is absent it defaults to true.
 - **Output encoding:** ffmpeg libx264, crf=18, preset=fast.
 - **Inference device:** auto-selects cuda > mps > cpu.
 
@@ -94,12 +97,14 @@ render.py
 | `track.py` | Stage 2: ball tracking (SORT-style) → COCO JSON with track_id |
 | `parse.py` | Stage 3: spatial filtering → COCO JSON with valid |
 | `render.py` | Stage 4: draw annotations on video frames → H.264 video |
-| `browse.py` | Interactive frame-by-frame viewer (PySide6) for any stage JSON |
-| `build_coco.py` | Extract video frames as JPEG + migrate valid annotations to training COCO JSON |
+| `pose.py` | Stage 5 (optional): run pose estimation on players → COCO JSON with keypoints |
+| `check_json.py` | Interactive frame-by-frame viewer (PySide6) for any stage JSON |
+| `extract_dataset.py` | Extract video frames as JPEG + migrate valid annotations to training COCO JSON |
 | `court_detector.py` | CourtDetector: template homography → 14 keypoints, clearance hulls; `compute_H_from_kps` |
 | `objects_detector.py` | ObjectsDetector: single predict() call for person/racket/ball |
 | `tracker.py` | `Tracker` (generic SORT, Kalman+Hungarian) + `BallTracker` (prefilter + gap fill) |
-| `utils.py` | Video I/O, `save_coco` / `load_detections`, `text_params` |
-| `train_detect.py` | Fine-tune YOLO on tennis dataset |
-| `eval_detect.py` | Evaluate model with per-class AP metrics |
+| `utils.py` | Video I/O, `save_coco` / `load_detections`, `text_params`; fast metadata reader `_read_meta` |
+| `train_ball.py` | Fine-tune YOLO ball/object detector |
+| `train_court.py` | Fine-tune court keypoint detector |
+| `eval_ball.py` | Evaluate ball detector with per-class AP metrics |
 | `debug_court.py` | Save intermediate court detection images for debugging |

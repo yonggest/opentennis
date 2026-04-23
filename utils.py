@@ -171,27 +171,48 @@ def save_coco(width, height, players, rackets, balls, path, fps=None, court=None
                 annotations.append(ann)
                 annotation_id += 1
 
-    result = {
-        'images':      images,
-        'annotations': annotations,
-        'categories':  _CATEGORIES,
-    }
+    result = {}
     if fps is not None:
         result['fps'] = fps
     if court is not None:
         result['court'] = _serialize_court(court)
     if video is not None:
         result['video'] = video
+    result['images']      = images
+    result['annotations'] = annotations
+    result['categories']  = _CATEGORIES
 
     with open(path, 'w') as f:
         json.dump(result, f, indent=2)
     print(f"[    coco] saved → {path}  ({annotation_id} annotations, {len(images)} frames)", flush=True)
 
 
+def _read_meta(json_path):
+    """只读 JSON 头部元数据（fps/court/video），遇到 "images" 键即停，避免解析巨大数组。
+
+    save_coco() 保证 fps/court/video 写在 images/annotations 之前，所以只需读文件头部。
+    """
+    CHUNK = 65536
+    buf = ''
+    with open(json_path) as f:
+        while True:
+            chunk = f.read(CHUNK)
+            if not chunk:
+                break
+            buf += chunk
+            # 元数据在 images/annotations 之前；找到任意一个即可截断
+            for sentinel in ('"images"', '"annotations"'):
+                idx = buf.find(sentinel)
+                if idx != -1:
+                    snippet = buf[:idx].rstrip().rstrip(',') + '}'
+                    return json.loads(snippet)
+    # 文件很小或旧格式（无 images/annotations），全量解析
+    return json.loads(buf)
+
+
 def load_video_path(json_path):
     """从 JSON 读取 video 字段，返回绝对路径（字段不存在则返回 None）。"""
-    with open(json_path) as f:
-        rel = json.load(f).get('video')
+    rel = _read_meta(json_path).get('video')
     if rel is None:
         return None
     return os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(json_path)), rel))
@@ -199,8 +220,7 @@ def load_video_path(json_path):
 
 def propagate_video(from_json_path, to_json_path):
     """从 from_json 读取 video 字段，转换为相对于 to_json 目录的路径（不存在则返回 None）。"""
-    with open(from_json_path) as f:
-        rel = json.load(f).get('video')
+    rel = _read_meta(from_json_path).get('video')
     if rel is None:
         return None
     from_dir = os.path.dirname(os.path.abspath(from_json_path))
