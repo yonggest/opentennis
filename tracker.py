@@ -593,15 +593,15 @@ class BallTracker:
             if use_validator:
                 h, w = frame.shape[:2]
 
-                # ── 阶段二：验证器交叉检验 ──────────────────────────────────
-                # 只处理两端的检测，中间段 [conf_low, conf_high) 不做验证：
-                #   conf >= conf_high : 主检测器高置信，但验证器不认（< conf_high）→ 替换 + 报警
-                #   conf <  conf_low  : 主检测器几乎未检出，验证器发现球（> conf_low） → 替换 + 报警
+                # ── 阶段二：提升超低置信度检测 ──────────────────────────────
+                # 对主检测器置信度 < conf_low 的检测，在其 bbox 附近运行验证器：
+                #   验证器置信度 > conf_low → 用验证器结果替换原始检测，高亮打印
+                #   否则保留原始检测不变
                 any_replaced = False
                 for det in frame_dets:
                     conf = det['conf']
-                    if self._tracker.conf_low <= conf < self._tracker.conf_high:
-                        continue  # 中间段不验证
+                    if conf >= self._tracker.conf_low:
+                        continue  # 只处理超低置信度检测
 
                     val_checked += 1
                     x1, y1, x2, y2 = det['bbox']
@@ -626,26 +626,14 @@ class BallTracker:
                                 best = (c, bx1 + cx1, by1 + cy1, bx2 + cx1, by2 + cy1)
                     if best is None:
                         continue
-                    if conf >= self._tracker.conf_high:
-                        # 高置信度检测，但验证器置信度低 → 异常，替换并报警
-                        if best[0] < self._tracker.conf_high:
-                            det['bbox']      = [best[1], best[2], best[3], best[4]]
-                            det['conf']      = best[0]
-                            det['validated'] = True
-                            val_replaced    += 1
-                            any_replaced     = True
-                            print(f"\033[1;33m[validate] f{fi}  WARNING: high-conf {conf:.3f} "
-                                  f"→ validator {best[0]:.3f} (< {self._tracker.conf_high})  replaced\033[0m")
-                    else:  # conf < conf_low
-                        # 超低置信度检测，验证器确认为球 → 补救，替换并报警
-                        if best[0] > self._tracker.conf_low:
-                            det['bbox']      = [best[1], best[2], best[3], best[4]]
-                            det['conf']      = best[0]
-                            det['validated'] = True
-                            val_replaced    += 1
-                            any_replaced     = True
-                            print(f"\033[1;33m[validate] f{fi}  WARNING: low-conf {conf:.3f} "
-                                  f"→ validator {best[0]:.3f} (> {self._tracker.conf_low})  promoted\033[0m")
+                    if best[0] > self._tracker.conf_low:
+                        det['bbox']      = [best[1], best[2], best[3], best[4]]
+                        det['conf']      = best[0]
+                        det['validated'] = True
+                        val_replaced    += 1
+                        any_replaced     = True
+                        print(f"\033[1;32m[validate] f{fi}  low-conf {conf:.3f} "
+                              f"→ validator {best[0]:.3f} (> {self._tracker.conf_low})  promoted\033[0m")
 
                 # 验证替换可能使某个低置信度检测的 bbox 与已有高置信度检测重叠，
                 # 产生重复框。仅在发生替换时做一次贪心 NMS 去重（按置信度降序保留）。
@@ -697,6 +685,9 @@ class BallTracker:
                                   f"(< 0.3)  recall conf={rdet['conf']:.3f}  "
                                   f"existing conf={near.get('conf', '?'):.3f}\033[0m")
                         rcl_found += 1
+                        print(f"\033[1;32m[recall] f{fi} tid={t.id}  FOUND "
+                              f"bbox={[round(v) for v in rdet['bbox']]} "
+                              f"conf={rdet['conf']:.3f}\033[0m")
                         frame_dets.append(dict(rdet, _recall=True))
 
             # ── 阶段四：追踪 ─────────────────────────────────────────────────
