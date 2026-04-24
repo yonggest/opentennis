@@ -14,6 +14,8 @@ models/*
 # Output videos and debug images
 output_videos/
 !output_videos/screenshot.jpeg
+debug/
+frames/
 
 # Input videos
 input_videos/*.mp4

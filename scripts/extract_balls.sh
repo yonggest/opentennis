@@ -39,8 +39,8 @@ run() {
   echo ""
   echo "── $label"
   echo "   → $out_dir"
-  echo -e "   \033[1;32m$\033[0m \033[1;33m.venv/bin/python extract_dataset.py\033[0m $* -o \"$out_dir\""
-  .venv/bin/python extract_dataset.py "$@" -o "$out_dir"
+  echo -e "   \033[1;32m$\033[0m \033[1;33m.venv/bin/python extract_object.py\033[0m $* -o \"$out_dir\""
+  .venv/bin/python extract_object.py "$@" -o "$out_dir"
 }
 
 run "正常样本" -i "$JSON" -p all    --sample high-conf

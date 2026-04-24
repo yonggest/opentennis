@@ -7,9 +7,9 @@
 --category 控制写出哪些类别的标注（不传则全部写出）。
 
 用法：
-    python extract_dataset.py -i video.tracked.json -o datasets/mydata
-    python extract_dataset.py -i video.tracked.json -o datasets/mydata -p net
-    python extract_dataset.py -i video.tracked.json -o datasets/mydata -p racket \\
+    python extract_object.py -i video.tracked.json -o datasets/mydata
+    python extract_object.py -i video.tracked.json -o datasets/mydata -p net
+    python extract_object.py -i video.tracked.json -o datasets/mydata -p racket \\
         --category "sports ball" "tennis racket"
 """
 

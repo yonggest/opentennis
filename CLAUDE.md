@@ -99,7 +99,7 @@ render.py
 | `render.py` | Stage 4: draw annotations on video frames → H.264 video |
 | `pose.py` | Stage 5 (optional): run pose estimation on players → COCO JSON with keypoints |
 | `check_json.py` | Interactive frame-by-frame viewer (PySide6) for any stage JSON |
-| `extract_dataset.py` | Extract video frames as JPEG + migrate valid annotations to training COCO JSON |
+| `extract_object.py` | Extract video frames as JPEG + migrate valid annotations to training COCO JSON |
 | `court_detector.py` | CourtDetector: template homography → 14 keypoints, clearance hulls; `compute_H_from_kps` |
 | `objects_detector.py` | ObjectsDetector: single predict() call for person/racket/ball |
 | `tracker.py` | `Tracker` (generic SORT, Kalman+Hungarian) + `BallTracker` (prefilter + gap fill) |
