@@ -67,6 +67,20 @@ _MAX_SPEED_MS      = 70.0  # 职业发球上限（m/s），与 tracker.py 一致
 _RADIUS_MARGIN     = 1.3   # max_dist 安全裕量系数，与 tracker.py 一致
 _LINEAR_WINDOW = 4   # 预测时只使用最近 N 个历史点估计速度方向
 
+_SETTINGS_FILE = Path.home() / '.config' / 'opentennis' / 'check_json.json'
+
+
+def _load_settings() -> dict:
+    try:
+        return json.loads(_SETTINGS_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def _save_settings(s: dict):
+    _SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _SETTINGS_FILE.write_text(json.dumps(s, indent=2))
+
 
 def _add_arrowed_line(scene, x1, y1, x2, y2, pen, tip_ratio=0.3, z=10):
     """带箭头的线段：主线 + 箭头三角形，与 cv2.arrowedLine tipLength 语义一致。"""
@@ -291,6 +305,22 @@ class BrowseApp(QMainWindow):
         self.show_player_traj: bool = True
         self.show_racket_traj: bool = True
         self.show_pose: bool        = True
+        _s = _load_settings()
+        if 'show_court' in _s:
+            self.show_court = bool(_s['show_court']) and court is not None
+        if 'show_ball_traj' in _s:
+            self.show_ball_traj = bool(_s['show_ball_traj'])
+        if 'show_player_traj' in _s:
+            self.show_player_traj = bool(_s['show_player_traj'])
+        if 'show_racket_traj' in _s:
+            self.show_racket_traj = bool(_s['show_racket_traj'])
+        if 'show_pose' in _s:
+            self.show_pose = bool(_s['show_pose'])
+        if 'hidden_cats' in _s:
+            cat_name_to_id = {v: k for k, v in categories.items()}
+            for name in _s['hidden_cats']:
+                if name in cat_name_to_id:
+                    self.visible_cats.discard(cat_name_to_id[name])
         self._ball_traj          = self._build_ball_trajectories()
         self._player_traj   = self._build_player_trajectories()
         self._racket_traj   = self._build_racket_trajectories()
@@ -344,7 +374,7 @@ class BrowseApp(QMainWindow):
             active = _PALETTE[i % len(_PALETTE)][0]
             dark   = _PALETTE[i % len(_PALETTE)][1]
             btn = QPushButton(f"  {cname}  ")
-            btn.setCheckable(True); btn.setChecked(True)
+            btn.setCheckable(True); btn.setChecked(cid in self.visible_cats)
             btn.setStyleSheet(f"""
                 QPushButton         {{ background:#2a2a2a; color:#666; border:none;
                                       padding:4px 10px; font:11pt Menlo; }}
@@ -358,7 +388,7 @@ class BrowseApp(QMainWindow):
 
         if self.court:
             self.court_btn = QPushButton("  球场  ")
-            self.court_btn.setCheckable(True); self.court_btn.setChecked(True)
+            self.court_btn.setCheckable(True); self.court_btn.setChecked(self.show_court)
             self.court_btn.setStyleSheet(f"""
                 QPushButton         {{ background:#2a2a2a; color:#666; border:none;
                                       padding:4px 10px; font:11pt Menlo; }}
@@ -370,7 +400,7 @@ class BrowseApp(QMainWindow):
             tl.addWidget(self.court_btn)
 
         self.ball_traj_btn = QPushButton("  网球轨迹  ")
-        self.ball_traj_btn.setCheckable(True); self.ball_traj_btn.setChecked(True)
+        self.ball_traj_btn.setCheckable(True); self.ball_traj_btn.setChecked(self.show_ball_traj)
         self.ball_traj_btn.setStyleSheet("""
             QPushButton         { background:#2a2a2a; color:#666; border:none;
                                   padding:4px 10px; font:11pt Menlo; }
@@ -382,7 +412,7 @@ class BrowseApp(QMainWindow):
         tl.addWidget(self.ball_traj_btn)
 
         self.player_traj_btn = QPushButton("  球员轨迹  ")
-        self.player_traj_btn.setCheckable(True); self.player_traj_btn.setChecked(True)
+        self.player_traj_btn.setCheckable(True); self.player_traj_btn.setChecked(self.show_player_traj)
         self.player_traj_btn.setStyleSheet("""
             QPushButton         { background:#2a2a2a; color:#666; border:none;
                                   padding:4px 10px; font:11pt Menlo; }
@@ -394,7 +424,7 @@ class BrowseApp(QMainWindow):
         tl.addWidget(self.player_traj_btn)
 
         self.racket_traj_btn = QPushButton("  球拍轨迹  ")
-        self.racket_traj_btn.setCheckable(True); self.racket_traj_btn.setChecked(True)
+        self.racket_traj_btn.setCheckable(True); self.racket_traj_btn.setChecked(self.show_racket_traj)
         self.racket_traj_btn.setStyleSheet("""
             QPushButton         { background:#2a2a2a; color:#666; border:none;
                                   padding:4px 10px; font:11pt Menlo; }
@@ -406,7 +436,7 @@ class BrowseApp(QMainWindow):
         tl.addWidget(self.racket_traj_btn)
 
         self.pose_btn = QPushButton("  球员姿态  ")
-        self.pose_btn.setCheckable(True); self.pose_btn.setChecked(True)
+        self.pose_btn.setCheckable(True); self.pose_btn.setChecked(self.show_pose)
         self.pose_btn.setStyleSheet("""
             QPushButton         { background:#2a2a2a; color:#666; border:none;
                                   padding:4px 10px; font:11pt Menlo; }
@@ -1265,6 +1295,16 @@ class BrowseApp(QMainWindow):
     def closeEvent(self, event):
         self._play_timer.stop()
         self.cap.release()
+        hidden_cats = [self.categories[cid] for cid in self.categories
+                       if cid not in self.visible_cats]
+        _save_settings({
+            'show_court':       self.show_court,
+            'show_ball_traj':   self.show_ball_traj,
+            'show_player_traj': self.show_player_traj,
+            'show_racket_traj': self.show_racket_traj,
+            'show_pose':        self.show_pose,
+            'hidden_cats':      hidden_cats,
+        })
         super().closeEvent(event)
 
 
