@@ -67,7 +67,7 @@ def main():
     results = model.train(
         data=args.data,
         epochs=args.epochs,
-        batch=1,
+        batch=32,
         lr0=args.lr0,
         imgsz=args.imgsz,
         freeze=0,            # 不冻结，全量微调
