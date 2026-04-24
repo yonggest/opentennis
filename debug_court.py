@@ -38,6 +38,71 @@ def draw_volume_wireframe(vis, pts_bot, pts_top, color):
         cv2.line(vis, tuple(pts_bot[i].astype(int)), tuple(pts_top[i].astype(int)),        color, 1)
 
 
+def min_circumscribed_quad(approx_pts):
+    """从 approxPolyDP 多边形的边中，枚举所有 C(n,4) 组合，
+    找能包住所有顶点的面积最小四边形。
+    返回 (4,2) float32 角点，失败返回 None。
+    """
+    from itertools import combinations
+    pts = approx_pts.reshape(-1, 2).astype(np.float64)
+    n   = len(pts)
+    if n == 4:
+        return pts.astype(np.float32)
+
+    def edge_line(i):
+        """第 i 条边延长线：(a, b, c) 满足 a*x + b*y = c。"""
+        p1, p2 = pts[i], pts[(i + 1) % n]
+        dx, dy = p2 - p1
+        a, b = -dy, dx
+        return a, b, a * p1[0] + b * p1[1]
+
+    def intersect(l1, l2):
+        a1, b1, c1 = l1;  a2, b2, c2 = l2
+        det = a1 * b2 - a2 * b1
+        if abs(det) < 1e-6:
+            return None
+        return np.array([(c1*b2 - c2*b1) / det,
+                         (a1*c2 - a2*c1) / det])
+
+    best_area    = float('inf')
+    best_corners = None
+
+    for idx in combinations(range(n), 4):
+        lines = [edge_line(i) for i in idx]
+
+        # 按法线角度排序，保证四边形循环顺序
+        order = np.argsort([np.arctan2(l[1], l[0]) for l in lines])
+        lines = [lines[o] for o in order]
+
+        # 求相邻边交点
+        corners = [intersect(lines[k], lines[(k + 1) % 4]) for k in range(4)]
+        if any(c is None for c in corners):
+            continue
+        corners = np.array(corners)
+
+        # 判断多边形所有点是否在四边形内
+        # 以四边形重心为内部参考点确定每条线的"内侧"方向
+        ctr = corners.mean(axis=0)
+        ok  = True
+        for a, b, c in lines:
+            inside_sign = np.sign(a * ctr[0] + b * ctr[1] - c)
+            if any(inside_sign * (a * p[0] + b * p[1] - c) < -1e-4 for p in pts):
+                ok = False
+                break
+        if not ok:
+            continue
+
+        area = 0.5 * abs(sum(
+            corners[k, 0] * corners[(k+1)%4, 1] - corners[(k+1)%4, 0] * corners[k, 1]
+            for k in range(4)
+        ))
+        if area < best_area:
+            best_area    = area
+            best_corners = corners
+
+    return best_corners.astype(np.float32) if best_corners is not None else None
+
+
 def save(path, img, label):
     cv2.imwrite(path, img, [cv2.IMWRITE_JPEG_QUALITY, 92])
     print(f"  → {path}  [{label}]")
@@ -130,6 +195,59 @@ def main():
         save(f"{out_dir}/4_seg_init.jpg", vis_seg, f"YOLO seg 初始 H（cost={c_seg:.3f}）")
     else:
         print("  YOLO seg 初始化失败，跳过步骤 4")
+
+    # ── 步骤 4b：凸包多边形近似 + 最优四边形 + 外接四边形 ──────────
+    seg_results = detector._run_seg(frame)
+    if seg_results and seg_results[0].masks is not None and len(seg_results[0].masks) > 0:
+        best = int(seg_results[0].boxes.conf.argmax())
+        poly = seg_results[0].masks.xy[best].astype(np.float32)
+
+        hull   = cv2.convexHull(poly.astype(np.int32))
+        eps    = 0.02 * cv2.arcLength(hull, True)
+        approx = cv2.approxPolyDP(hull, eps, True).reshape(-1, 2).astype(np.float32)
+        quad   = approx if len(approx) == 4 else detector._best_quad(approx)
+        quad_sorted = detector._sort_quad(quad)
+
+        # 最小面积外接四边形（包住 approx 的所有顶点）
+        min_circ = min_circumscribed_quad(approx)
+
+        vis_quad = frame.copy()
+
+        # seg mask（半透明）
+        mask_img = np.zeros(frame.shape[:2], dtype=np.uint8)
+        cv2.fillPoly(mask_img, [poly.astype(np.int32)], 255)
+        vis_quad[mask_img > 0] = (vis_quad[mask_img > 0] * 0.5
+                                  + np.array([100, 60, 0]) * 0.5).astype(np.uint8)
+
+        # 凸包近似多边形（黄色）
+        for pt in approx.astype(int):
+            cv2.circle(vis_quad, tuple(pt), 5, (0, 220, 255), -1)
+        cv2.polylines(vis_quad, [approx.astype(np.int32).reshape(-1, 1, 2)],
+                      True, (0, 220, 255), 1)
+
+        # 最优四边形（红色）
+        cv2.polylines(vis_quad, [quad_sorted.astype(np.int32).reshape(-1, 1, 2)],
+                      True, (0, 0, 255), 2)
+        for i, pt in enumerate(quad_sorted.astype(int)):
+            cv2.circle(vis_quad, tuple(pt), 8, (0, 0, 255), -1)
+
+        # 最小面积外接四边形（绿色大圆 + 编号）
+        if min_circ is not None:
+            circ = detector._sort_quad(min_circ)
+            cv2.polylines(vis_quad, [circ.astype(np.int32).reshape(-1, 1, 2)],
+                          True, (0, 255, 80), 2)
+            for i, pt in enumerate(circ.astype(int)):
+                cv2.circle(vis_quad, tuple(pt), 10, (0, 255, 80), -1)
+                cv2.putText(vis_quad, str(i), (pt[0] + 12, pt[1] + 6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 80), 2)
+
+        cv2.putText(vis_quad,
+                    f"approx {len(approx)}pts  best-quad(red)  min-circ(green)",
+                    (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 220, 255), 2)
+        save(f"{out_dir}/4b_best_quad.jpg", vis_quad,
+             f"approx {len(approx)} 顶点（黄）→ best quad（红）→ 最小外接四边形（绿）")
+    else:
+        print("  seg 结果不可用，跳过步骤 4b")
 
     # ── 步骤 5：优化后结果 ──────────────────────────────────────────
     H_opt = detector._optimize(H_seg, dist_map, frame.shape)

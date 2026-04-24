@@ -478,9 +478,10 @@ class CourtDetector:
         if len(approx) < 4:
             return None, 1e9
 
-        # 若顶点 > 4 个，按面积选最优四边形
+        # 若顶点 > 4 个，求包住所有顶点的最小面积四边形
         if len(approx) != 4:
-            approx = self._best_quad(approx)
+            circ = self._min_circumscribed_quad(approx)
+            approx = circ if circ is not None else self._best_quad(approx)
 
         # 排序：tl, tr, br, bl（按 y 分上下两行，各行按 x 排序）
         corners = self._sort_quad(approx)
@@ -518,6 +519,59 @@ class CourtDetector:
                 best_area = area
                 best_quad = q
         return best_quad
+
+    @staticmethod
+    def _min_circumscribed_quad(approx_pts):
+        """枚举 approx 多边形所有 C(n,4) 条边组合，
+        返回能包住所有顶点的面积最小四边形。失败返回 None。"""
+        from itertools import combinations
+        pts = approx_pts.reshape(-1, 2).astype(np.float64)
+        n   = len(pts)
+
+        def edge_line(i):
+            p1, p2 = pts[i], pts[(i + 1) % n]
+            dx, dy = p2 - p1
+            a, b = -dy, dx
+            return a, b, a * p1[0] + b * p1[1]
+
+        def intersect(l1, l2):
+            a1, b1, c1 = l1;  a2, b2, c2 = l2
+            det = a1 * b2 - a2 * b1
+            if abs(det) < 1e-6:
+                return None
+            return np.array([(c1*b2 - c2*b1) / det, (a1*c2 - a2*c1) / det])
+
+        best_area    = float('inf')
+        best_corners = None
+
+        for idx in combinations(range(n), 4):
+            lines = [edge_line(i) for i in idx]
+            order = np.argsort([np.arctan2(l[1], l[0]) for l in lines])
+            lines = [lines[o] for o in order]
+
+            corners = [intersect(lines[k], lines[(k + 1) % 4]) for k in range(4)]
+            if any(c is None for c in corners):
+                continue
+            corners = np.array(corners)
+
+            ctr = corners.mean(axis=0)
+            ok  = True
+            for a, b, c in lines:
+                sign = np.sign(a * ctr[0] + b * ctr[1] - c)
+                if any(sign * (a * p[0] + b * p[1] - c) < -1e-4 for p in pts):
+                    ok = False; break
+            if not ok:
+                continue
+
+            area = 0.5 * abs(sum(
+                corners[k, 0] * corners[(k+1)%4, 1] - corners[(k+1)%4, 0] * corners[k, 1]
+                for k in range(4)
+            ))
+            if area < best_area:
+                best_area    = area
+                best_corners = corners
+
+        return best_corners.astype(np.float32) if best_corners is not None else None
 
     # ── 9. 投影关键点 ────────────────────────────────────────────────
     def _project_keypoints(self, H):
