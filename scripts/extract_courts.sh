@@ -33,7 +33,7 @@ fi
 cd "$(dirname "$0")/.."
 
 # 收集所有视频
-mapfile -t VIDEOS < <(find "$VIDEO_DIR" -maxdepth 1 \( -name "*.mp4" -o -name "*.avi" \) | sort)
+mapfile -t VIDEOS < <(find "$VIDEO_DIR" -maxdepth 1 \( -name "*.mp4" -o -name "*.MP4" -o -name "*.avi" -o -name "*.AVI" \) | sort)
 
 if [[ ${#VIDEOS[@]} -eq 0 ]]; then
   echo "错误: 未找到 .mp4/.avi 文件: $VIDEO_DIR" >&2

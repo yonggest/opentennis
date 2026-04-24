@@ -83,7 +83,8 @@ def main():
     if input_path.is_file():
         videos = [input_path]
     elif input_path.is_dir():
-        videos = sorted(input_path.glob('*.mp4')) + sorted(input_path.glob('*.avi'))
+        videos = sorted({p for ext in ('*.mp4', '*.MP4', '*.avi', '*.AVI')
+                         for p in input_path.glob(ext)})
         if not videos:
             print(f"错误: 未找到 .mp4/.avi 文件: {input_path}", file=sys.stderr)
             sys.exit(1)
