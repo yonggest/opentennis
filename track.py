@@ -19,7 +19,7 @@ from scipy.ndimage import gaussian_filter1d
 
 from utils import load_detections, load_video_path, save_coco, iter_frames, propagate_video
 from tracker import BallTracker, PlayerTracker, RacketTracker
-from court_detector import COURT_W as _COURT_W
+from court_detector import COURT_W as _COURT_W, compute_H_from_kps, compute_court_polygons
 
 _VIDEO_EXTENSIONS     = ('.mp4', '.mov', '.avi', '.mkv', '.MP4', '.MOV', '.AVI', '.MKV')
 _SMOOTH_SIGMA_SECONDS = 0.1   # 轨迹平滑高斯核标准差（秒）
@@ -124,6 +124,8 @@ def parse_args():
     p.add_argument('--conf-high',            type=float, default=0.5,  help='高置信度阈值：>= 此值的检测可新建轨迹')
     p.add_argument('--conf-low',             type=float, default=0.0,  help='低置信度下限：[low,high) 的检测仅续接已有轨迹')
     p.add_argument('--search-diameters',     type=float, default=3.0,  help='球追踪搜索半径 = N × 球径（px）')
+    p.add_argument('--min-aspect-h',         type=float, default=0.15, help='水平拉长（w≥h）长宽比下限：运动模糊允许较大拉伸')
+    p.add_argument('--min-aspect-v',         type=float, default=0.5,  help='垂直拉长（h>w）长宽比下限：竖向模糊罕见，严格限制')
     p.add_argument('--sub-model',            default=None,             help='次检测器模型路径；传入后启用次检测器进行 recall 补检')
     p.add_argument('--sub-save-dir',         default=None,             help='调试：将每次 recall 的 patch 图存入该目录')
     p.add_argument('--debug-frame',          type=int,   default=-1,   help='打印指定帧的追踪器内部状态（-1 关闭）')
@@ -170,6 +172,18 @@ def main():
 
     fps, width, height, court, players, rackets, balls = load_detections(args.input)
     ppm = _px_per_meter(court['keypoints'])
+    H     = compute_H_from_kps(court['keypoints'])
+    H_inv = np.linalg.inv(H.astype(np.float64))
+
+    # 计算背景板 / 网带图像多边形，存入 court 供后续阶段使用
+    try:
+        backdrop_poly, net_poly = compute_court_polygons(H, width, height)
+        court['backdrop_poly'] = backdrop_poly
+        court['net_poly']      = net_poly
+        print(f"[ court ] backdrop_poly={[f'({p[0]:.0f},{p[1]:.0f})' for p in backdrop_poly]}")
+        print(f"[ court ] net_poly     ={[f'({p[0]:.0f},{p[1]:.0f})' for p in net_poly]}")
+    except Exception as e:
+        print(f"[ court ] 警告：无法计算背景板/网带多边形：{e}")
 
     # 查找视频文件：优先读 JSON 的 video 字段，再按扩展名枚举
     video_path = load_video_path(args.input)
@@ -202,17 +216,23 @@ def main():
     # 网球追踪：recall 补检 + gap 插值（均在 BallTracker 内逐帧完成）
     # 无次检测器时不需要读取视频帧
     ball_frames = iter_frames(video_path) if (video_path and sub_model) else None
-    balls = BallTracker.from_video(
+    balls, frame_predictions = BallTracker.from_video(
         fps, ppm,
         conf_high=args.conf_high, conf_low=args.conf_low,
         search_diameters=args.search_diameters,
+        min_aspect_h=args.min_aspect_h, min_aspect_v=args.min_aspect_v,
+        H_inv=H_inv,
+        backdrop_poly=court.get('backdrop_poly'),
         sub_model=sub_model,
         sub_save_dir=args.sub_save_dir,
-    ).run(balls, debug_frame=args.debug_frame, frames=ball_frames)
+    ).run(balls,
+          rackets=rackets, players=players, court=court,
+          debug_frame=args.debug_frame, frames=ball_frames)
 
     save_coco(width, height, players, rackets, balls,
               output_path, fps=fps, court=court,
-              video=propagate_video(args.input, output_path))
+              video=propagate_video(args.input, output_path),
+              frame_predictions=frame_predictions)
 
 
 if __name__ == '__main__':

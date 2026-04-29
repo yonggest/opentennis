@@ -61,11 +61,6 @@ _SKELETON = [
     (11, 13), (13, 15), (12, 14), (14, 16),
 ]
 _KP_CONF_THRESH = 0.3
-_SEARCH_DIAMETERS  = 2.0   # 搜索半径倍数，与 tracker.py 默认值一致
-_GAP_SECONDS       = 0.5   # 轨迹最大间隙时长（s），与 tracker.py _GAP_SECONDS 保持一致
-_MAX_SPEED_MS      = 70.0  # 职业发球上限（m/s），与 tracker.py 一致
-_RADIUS_MARGIN     = 1.3   # max_dist 安全裕量系数，与 tracker.py 一致
-_LINEAR_WINDOW = 4   # 预测时只使用最近 N 个历史点估计速度方向
 
 _SETTINGS_FILE = Path.home() / '.config' / 'opentennis' / 'check_json.json'
 
@@ -112,43 +107,53 @@ def _project_line(H, x1, y1, x2, y2):
 
 # ── JSON 加载 ─────────────────────────────────────────────────────────────────
 
-def load_annotations(json_path: Path) -> tuple[dict, dict, dict | None]:
+def load_annotations(json_path: Path):
     """
-    读取 COCO 格式 JSON，返回 (frame_anns, categories, court)
-      frame_anns : {frame_idx: [{"bbox":[x,y,w,h], "category_id":int, "score":float}, ...]}
-      categories : {cat_id: name}
-      court      : {"keypoints":[[x,y],...], "ground_hull":[[x,y],...], ...} 或 None
-    image.id 直接作为帧号。
+    读取 COCO 格式 JSON。
+
+    返回：
+      frame_anns   : {frame_idx: [ann_dict, ...]}
+      categories   : {cat_id: name}
+      court        : dict 或 None
+      video_abs    : Path 或 None
+      frame_preds  : {frame_idx: [{"tid":int,"cx":float,"cy":float,"r":float}, ...]}
     """
     with open(json_path) as f:
         data = json.load(f)
 
     cats = {c["id"]: c["name"] for c in data.get("categories", [])}
 
+    # 每帧的标注
     frame_anns: dict[int, list] = {}
     for ann in data.get("annotations", []):
         entry = {
-            "bbox":         ann["bbox"],
-            "category_id":  ann["category_id"],
-            "score":        ann.get("score", 1.0),
-            "track_id":     ann.get("track_id"),
-            "valid":        ann.get("valid", True),
-            "interpolated":   ann.get("interpolated", False),
-            "recall":         ann.get("recall", False),
-            "validated":      ann.get("validated", False),
+            "bbox":        ann["bbox"],
+            "category_id": ann["category_id"],
+            "score":       ann.get("score", 1.0),
+            "track_id":    ann.get("track_id"),
+            "valid":       ann.get("valid", True),
+            "interpolated": ann.get("interpolated", False),
+            "revealed_at":  ann.get("revealed_at"),
+            "backfill":     ann.get("backfill", False),
+            "recall":       ann.get("recall", False),
+            "validated":    ann.get("validated", False),
         }
-        if "foot" in ann:
-            entry["foot"] = ann["foot"]
-        if "center" in ann:
-            entry["center"] = ann["center"]
-        if "keypoints" in ann:
-            entry["keypoints"] = ann["keypoints"]
+        if "foot"      in ann: entry["foot"]      = ann["foot"]
+        if "center"    in ann: entry["center"]    = ann["center"]
+        if "keypoints" in ann: entry["keypoints"] = ann["keypoints"]
         frame_anns.setdefault(ann["image_id"], []).append(entry)
+
+    # 每帧的追踪器预测圆（由 track.py 写入 image["ball_predictions"]）
+    frame_preds: dict[int, list] = {}
+    for img in data.get("images", []):
+        preds = img.get("ball_predictions")
+        if preds:
+            frame_preds[img["id"]] = preds
 
     court     = data.get("court")
     video_rel = data.get("video")
     video_abs = (json_path.parent / video_rel).resolve() if video_rel else None
-    return frame_anns, cats, court, video_abs
+    return frame_anns, cats, court, video_abs, frame_preds
 
 
 # ── View（缩放/平移） ─────────────────────────────────────────────────────────
@@ -267,7 +272,8 @@ class CourtMapWidget(QWidget):
 # ── 主窗口 ────────────────────────────────────────────────────────────────────
 
 class BrowseApp(QMainWindow):
-    def __init__(self, video_path: Path, frame_anns: dict, categories: dict, court: dict | None):
+    def __init__(self, video_path: Path, frame_anns: dict, categories: dict,
+                 court: dict | None, frame_preds: dict | None = None):
         super().__init__()
         self.video_path  = video_path
         self.frame_anns  = frame_anns
@@ -294,12 +300,6 @@ class BrowseApp(QMainWindow):
                                  if "person" in name.lower()}
         self.racket_cids: set = {cid for cid, name in categories.items()
                                  if "racket" in name.lower()}
-        # parse.py 之后的 JSON 会出现 valid=False 的标注；有 False 说明已过滤，不显示搜索圆
-        self._has_parsed: bool = any(
-            ann.get("valid") is False
-            for anns in frame_anns.values()
-            for ann in anns
-        )
         self.show_court: bool       = court is not None
         self.show_ball_traj:  bool       = True
         self.show_player_traj: bool = True
@@ -321,9 +321,11 @@ class BrowseApp(QMainWindow):
             for name in _s['hidden_cats']:
                 if name in cat_name_to_id:
                     self.visible_cats.discard(cat_name_to_id[name])
-        self._ball_traj          = self._build_ball_trajectories()
-        self._player_traj   = self._build_player_trajectories()
-        self._racket_traj   = self._build_racket_trajectories()
+        self._ball_traj   = self._build_ball_trajectories()
+        self._player_traj = self._build_player_trajectories()
+        self._racket_traj = self._build_racket_trajectories()
+        # 每帧预测圆（由 track.py 预计算并存入 JSON）
+        self.frame_preds: dict = frame_preds or {}
 
         # H_inv 投影：图像像素 → 球场坐标（Z=0 平面）
         self._H_inv: np.ndarray | None = None
@@ -339,10 +341,6 @@ class BrowseApp(QMainWindow):
             sys.exit(1)
         self.total_frames  = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.fps           = self.cap.get(cv2.CAP_PROP_FPS) or 25.0
-        # tracker 的 max_age（帧数），用于轨迹间隙判断和预测范围，与 tracker.py 计算方式一致
-        self._ball_traj_max_age = max(3, round(self.fps * _GAP_SECONDS))
-        # hist=1 时的搜索门限：单帧最大球速对应的像素位移（与 tracker.py 的 effective_gate 一致）
-        self._max_dist = self._compute_max_dist()
         self.current_frame: int = -1
 
         self._current_pixmap: QPixmap | None = None
@@ -661,9 +659,18 @@ class BrowseApp(QMainWindow):
             valid         = ann.get("valid", True)
             track_id      = ann.get("track_id")
             interpolated  = ann.get("interpolated", False)
+            revealed_at   = ann.get("revealed_at")
+            backfill      = ann.get("backfill", False)
             recall         = ann.get("recall", False)
             validated     = ann.get("validated", False)
             is_ball       = cid in self.ball_cids
+
+            # 插值点在间隙关闭前完全隐藏（该帧根本没有检测到球）
+            if interpolated and revealed_at is not None and revealed_at > cur:
+                continue
+            # 回填点在确认前隐藏 track_id（检测是真实的，但归属未确认）
+            if backfill and revealed_at is not None and revealed_at > cur:
+                track_id = None
 
             # ── 颜色 / 样式判断 ───────────────────────────────────────────────
             # parse 阶段 invalid：
@@ -723,8 +730,7 @@ class BrowseApp(QMainWindow):
 
         if self.show_ball_traj and self._ball_traj:
             self._render_ball_trajectories()
-            if not self._has_parsed:
-                self._render_predictions()
+            self._render_predictions()
 
         if self.show_player_traj and self._player_traj:
             self._render_player_trajectories()
@@ -787,6 +793,20 @@ class BrowseApp(QMainWindow):
             self.scene.addLine(vol_bot[i][0], vol_bot[i][1], vol_bot[j][0], vol_bot[j][1], volume_pen).setZValue(1)
             self.scene.addLine(vol_top[i][0], vol_top[i][1], vol_top[j][0], vol_top[j][1], volume_pen).setZValue(1)
             self.scene.addLine(vol_bot[i][0], vol_bot[i][1], vol_top[i][0], vol_top[i][1], volume_pen).setZValue(1)
+
+        # 远端背景板和网带多边形
+        backdrop_poly = self.court.get("backdrop_poly")
+        net_poly      = self.court.get("net_poly")
+        backdrop_pen  = QPen(QColor("#ff6060"), 1); backdrop_pen.setCosmetic(True)
+        net_pen       = QPen(QColor("#60ff60"), 1); net_pen.setCosmetic(True)
+        backdrop_brush = QBrush(QColor(255, 60, 60, 30))
+        net_brush      = QBrush(QColor(60, 255, 60, 30))
+        if backdrop_poly:
+            pts = [QPointF(p[0], p[1]) for p in backdrop_poly]
+            self.scene.addPolygon(QPolygonF(pts + [pts[0]]), backdrop_pen, backdrop_brush).setZValue(1)
+        if net_poly:
+            pts = [QPointF(p[0], p[1]) for p in net_poly]
+            self.scene.addPolygon(QPolygonF(pts + [pts[0]]), net_pen, net_brush).setZValue(1)
 
     def _render_outside_masks(self, vol_bot, vol_top):
         """在缓冲区侧边外部绘制半透明遮罩。
@@ -856,10 +876,9 @@ class BrowseApp(QMainWindow):
         self.scene.addPolygon(right_poly, no_pen, mask_brush).setZValue(0.5)
 
     def _build_ball_trajectories(self) -> dict[int, list[tuple]]:
-        """返回 {track_id: [(frame_idx, cx, cy, ball_d_px), ...]}。
+        """返回 {track_id: [(frame_idx, cx, cy, revealed_at), ...]}。
 
         仅含已追踪（track_id != None）的网球标注。
-        ball_d_px 为检测 bbox 均值宽高，用于计算透视自适应搜索半径。
         """
         traj: dict[int, list] = {}
         for frame_idx, anns in self.frame_anns.items():
@@ -869,8 +888,8 @@ class BrowseApp(QMainWindow):
                     continue
                 x, y, w, h = ann["bbox"]
                 cx, cy = x + w / 2, y + h / 2
-                ball_d_px = (w + h) / 2.0
-                traj.setdefault(tid, []).append((frame_idx, cx, cy, ball_d_px))
+                traj.setdefault(tid, []).append(
+                    (frame_idx, cx, cy, ann.get("revealed_at")))
         for pts in traj.values():
             pts.sort(key=lambda t: t[0])
         return traj
@@ -889,7 +908,7 @@ class BrowseApp(QMainWindow):
         result: dict[int, list] = {}
         for tid, pts in self._ball_traj.items():
             court_pts = []
-            for fi, cx, cy, _ in pts:
+            for fi, cx, cy, _rev in pts:
                 xy = self._project_to_court(cx, cy)
                 if xy:
                     court_pts.append((fi, xy[0], xy[1]))
@@ -945,111 +964,62 @@ class BrowseApp(QMainWindow):
     def _racket_traj_color(self, track_id: int) -> QColor:
         return _RACKET_TRAJ_COLORS[track_id % len(_RACKET_TRAJ_COLORS)]
 
-    def _compute_max_dist(self) -> float | None:
-        """从 court keypoints + fps 推算单帧最大球速像素位移（与 tracker.py effective_gate 的 max_dist 一致）。"""
-        if not self.court:
-            return None
-        kps = self.court.get("keypoints", [])
-        if len(kps) < 4:
-            return None
-        k = np.array(kps, dtype=np.float32).reshape(-1, 2)
-        far_ppm  = float(np.linalg.norm(k[1] - k[0])) / _COURT_W
-        near_ppm = float(np.linalg.norm(k[3] - k[2])) / _COURT_W
-        px_per_meter = (far_ppm + near_ppm) / 2.0
-        return _MAX_SPEED_MS / self.fps * px_per_meter * _RADIUS_MARGIN
-
     def _ball_traj_color(self, track_id: int) -> QColor:
         return _BALL_TRAJ_COLORS[track_id % len(_BALL_TRAJ_COLORS)]
 
     def _render_ball_trajectories(self):
-        """绘制当前帧及之前的网球轨迹线段。"""
+        """绘制当前帧及之前的网球轨迹线段。
+
+        只显示 revealed_at <= cur 的点（算法已知的点）。
+        """
         cur = self.current_frame
 
         for tid, pts in self._ball_traj.items():
             color = self._ball_traj_color(tid)
             prev = None
-            for frame_idx, cx, cy, _ in pts:
+            for frame_idx, cx, cy, revealed_at in pts:
                 if frame_idx > cur:
                     break
+                if revealed_at is not None and revealed_at > cur:
+                    continue
                 if prev is not None:
                     pf, px, py = prev
-                    # 仅连接相邻帧，避免跨越长间隙时画长线
-                    if frame_idx - pf <= self._ball_traj_max_age:
-                        alpha = int(255 * max(0.2, 1.0 - (cur - frame_idx) / _BALL_TRAJ_FADE_FRAMES))
-                        c = QColor(color)
-                        c.setAlpha(alpha)
-                        p = QPen(c, 2)
-                        p.setCosmetic(True)
-                        _add_arrowed_line(self.scene, px, py, cx, cy, p)
+                    alpha = int(255 * max(0.2, 1.0 - (cur - frame_idx) / _BALL_TRAJ_FADE_FRAMES))
+                    seg_c = QColor(color); seg_c.setAlpha(alpha)
+                    seg_pen = QPen(seg_c, 2); seg_pen.setCosmetic(True)
+                    _add_arrowed_line(self.scene, px, py, cx, cy, seg_pen)
                 prev = (frame_idx, cx, cy)
 
     def _render_predictions(self):
-        """为每条活动轨迹绘制预测曲线及下一帧搜索圆。
-
-        预测：最多取最近 _LINEAR_WINDOW 个点线性外推（与 tracker.py 一致）。
-
-        搜索圆半径（与 tracker.py effective_gate 保持一致）：
-          hist == 1 → self._max_dist（单帧最大球速，物理兜底）
-          hist  > 1 → _SEARCH_DIAMETERS × 最近一帧检测球径（透视自适应）
-        """
-        cur = self.current_frame
-
-        for tid, pts in self._ball_traj.items():
-            # 取当前帧及之前的检测点（4-tuple: frame_idx, cx, cy, ball_d_px）
-            past = [p for p in pts if p[0] <= cur]
-            if not past:
-                continue
-            last_fi = past[-1][0]
-            # 超过 max_age 帧未检测到，tracker 已删除该轨迹，不再显示预测
-            if cur - last_fi > self._ball_traj_max_age:
-                continue
-
+        """绘制当前帧的追踪器搜索圆（由 track.py 预计算并存入 JSON）。
+        - 实线小圆：主预测（3点）和次预测（2点）
+        - 虚线大圆：球拍感知全向搜索圆（r_max = max_dist）"""
+        for pred in self.frame_preds.get(self.current_frame, []):
+            tid = pred['tid']
+            cx, cy, r = pred['cx'], pred['cy'], pred['r']
             color = self._ball_traj_color(tid)
-            ts = np.array([p[0] for p in past], dtype=float)
-            xs = np.array([p[1] for p in past], dtype=float)
-            ys = np.array([p[2] for p in past], dtype=float)
-            t0    = ts[-1]
-            tn    = ts - t0
-            t_end = float(cur + 1 + self._ball_traj_max_age - t0)
-
-            # 最多取最近 _LINEAR_WINDOW 个点（不足时取全部）线性外推
-            w = _LINEAR_WINDOW
-            deg = min(1, len(past) - 1)
-            px_coef = np.polyfit(tn[-w:], xs[-w:], deg)
-            py_coef = np.polyfit(tn[-w:], ys[-w:], deg)
-
-            # 预测曲线：从最后已知点到 cur+1+traj_max_age
-            n_pts  = max(8, min(120, int(t_end * 3)))
-            sample = np.linspace(0.0, t_end, n_pts)
-            pred_x = np.polyval(px_coef, sample)
-            pred_y = np.polyval(py_coef, sample)
-
-            pred_color = QColor(color); pred_color.setAlpha(110)
-            pred_pen   = QPen(pred_color, 1); pred_pen.setCosmetic(True)
-            pred_pen.setStyle(Qt.DotLine)
-            for i in range(n_pts - 1):
-                self.scene.addLine(
-                    float(pred_x[i]),   float(pred_y[i]),
-                    float(pred_x[i+1]), float(pred_y[i+1]),
-                    pred_pen,
-                ).setZValue(11)
-
-            # 搜索圆半径：与 tracker.py effective_gate 逻辑一致
-            if len(past) == 1 and self._max_dist is not None:
-                sr = self._max_dist
-            else:
-                sr = _SEARCH_DIAMETERS * past[-1][3]   # past[-1][3] = ball_d_px
-
-            # 下一帧预测位置的搜索圆
-            t_next  = float(cur + 1 - t0)
-            next_cx = float(np.polyval(px_coef, t_next))
-            next_cy = float(np.polyval(py_coef, t_next))
             c_color = QColor(color); c_color.setAlpha(180)
-            c_pen   = QPen(c_color, 1); c_pen.setCosmetic(True)
+            c_pen = QPen(c_color, 1); c_pen.setCosmetic(True)
             self.scene.addEllipse(
-                next_cx - sr, next_cy - sr, sr * 2, sr * 2,
+                cx - r, cy - r, r * 2, r * 2,
                 c_pen, QBrush(Qt.NoBrush),
             ).setZValue(11)
+            if 'cx2' in pred:
+                cx2, cy2 = pred['cx2'], pred['cy2']
+                self.scene.addEllipse(
+                    cx2 - r, cy2 - r, r * 2, r * 2,
+                    c_pen, QBrush(Qt.NoBrush),
+                ).setZValue(11)
+            if 'r_max' in pred:
+                r_max = pred['r_max']
+                dash_color = QColor(color); dash_color.setAlpha(180)
+                dash_pen = QPen(dash_color, 2)
+                dash_pen.setStyle(Qt.PenStyle.DashLine)
+                dash_pen.setCosmetic(True)
+                self.scene.addEllipse(
+                    cx - r_max, cy - r_max, r_max * 2, r_max * 2,
+                    dash_pen, QBrush(Qt.NoBrush),
+                ).setZValue(20)
 
     def _render_player_trajectories(self):
         """绘制球员脚步全量历史轨迹（淡出效果，不含将来帧）。"""
@@ -1062,12 +1032,10 @@ class BrowseApp(QMainWindow):
                     break
                 if prev is not None:
                     pf, px, py = prev
-                    if frame_idx - pf <= self._ball_traj_max_age:
-                        alpha = int(255 * max(0.15, 1.0 - (cur - frame_idx) / _PLAYER_TRAJ_FADE_FRAMES))
-                        c = QColor(color)
-                        c.setAlpha(alpha)
-                        p = QPen(c, 2); p.setCosmetic(True)
-                        _add_arrowed_line(self.scene, px, py, fx, fy, p)
+                    alpha = int(255 * max(0.15, 1.0 - (cur - frame_idx) / _PLAYER_TRAJ_FADE_FRAMES))
+                    c = QColor(color); c.setAlpha(alpha)
+                    p = QPen(c, 2); p.setCosmetic(True)
+                    _add_arrowed_line(self.scene, px, py, fx, fy, p)
                 prev = (frame_idx, fx, fy)
 
     def _toggle_ball_traj(self):
@@ -1224,7 +1192,8 @@ class BrowseApp(QMainWindow):
             sep,
         ]
 
-        if self._has_parsed:
+        has_invalid = bool(inv_balls or inv_persons or inv_rackets)
+        if has_invalid:
             html_parts.append(
                 f'<tr><td colspan="3" style="color:{HDR}; font-size:9pt; padding:2px 0 3px 0;">'
                 f'有效检测</td></tr>')
@@ -1331,7 +1300,7 @@ def main():
         print(f"错误: JSON 文件不存在: {json_path}", file=sys.stderr)
         sys.exit(1)
 
-    frame_anns, categories, court, video_path = load_annotations(json_path)
+    frame_anns, categories, court, video_path, frame_preds = load_annotations(json_path)
 
     if not video_path:
         print("错误: JSON 中未包含 video 字段，无法定位视频文件", file=sys.stderr)
@@ -1347,7 +1316,7 @@ def main():
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    win = BrowseApp(video_path, frame_anns, categories, court)
+    win = BrowseApp(video_path, frame_anns, categories, court, frame_preds)
     win.show()
     sys.exit(app.exec())
 

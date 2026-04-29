@@ -12,7 +12,7 @@ TemplateHomographyDetector
 import cv2
 import numpy as np
 from pathlib import Path
-from scipy.optimize import minimize
+from scipy.optimize import minimize, minimize_scalar
 
 # ── 球场尺寸（国际网联标准，米）─────────────────────────────────
 COURT_W     = 10.97
@@ -46,6 +46,76 @@ CENTER_MARK_L = 0.10   # 中心标志长 10 cm（向场内延伸）
 # ── ITF 标准场地缓冲区（比赛场地最小净空）────────────────────────
 CLEARANCE_BACK = 6.40  # 底线后方缓冲（米）
 CLEARANCE_SIDE = 3.66  # 侧线外侧缓冲（米）
+
+# ── 网带和背景板参数 ────────────────────────────────────────────
+NET_H_POST   = 1.07   # 网带立柱高度（m）
+NET_POST_OFF = 0.914  # 立柱在双打侧线外的距离（m）
+BACKDROP_H   = 4.0    # 远端背景板高度（m）
+
+
+def compute_camera_P(H, width, height):
+    """从地面单应矩阵 H（球场坐标→图像坐标）恢复 3×4 投影矩阵 P。
+
+    通过最小化正交性残差求解焦距 f，再分解 R/t。
+    假设主点在图像中心（cx=w/2, cy=h/2）。
+    """
+    cx, cy = width / 2.0, height / 2.0
+    h1, h2 = H[:, 0], H[:, 1]
+
+    def cost(f):
+        Ki = np.array([[1/f, 0, -cx/f], [0, 1/f, -cy/f], [0, 0, 1.0]])
+        r1 = Ki @ h1; r2 = Ki @ h2
+        return (r1 @ r2)**2 + (r1 @ r1 - r2 @ r2)**2
+
+    f  = minimize_scalar(cost, bounds=(width * 0.3, width * 20), method='bounded').x
+    K  = np.array([[f, 0, cx], [0, f, cy], [0, 0, 1.0]])
+    Ki = np.linalg.inv(K)
+    lam = 1.0 / np.linalg.norm(Ki @ h1)
+    r1  = lam * (Ki @ H[:, 0])
+    r2  = lam * (Ki @ H[:, 1])
+    r3  = np.cross(r1, r2)
+    t   = lam * (Ki @ H[:, 2])
+    if t[2] < 0:
+        r1, r2, r3, t = -r1, -r2, -r3, -t
+    R = np.column_stack([r1, r2, r3])
+    # 确保 z 轴朝上（高处点投影到低像素 y）
+    mid       = np.array([COURT_W / 2, COURT_L / 2, 0.0])
+    cam_above = R @ (mid + [0, 0, 1]) + t
+    cam_mid   = R @ mid + t
+    if (K[1, 1] * cam_above[1] / cam_above[2] + K[1, 2] >
+            K[1, 1] * cam_mid[1] / cam_mid[2] + K[1, 2]):
+        r3 = -r3
+        R  = np.column_stack([r1, r2, r3])
+    return K @ np.hstack([R, t[:, None]])
+
+
+def compute_court_polygons(H, width, height):
+    """计算远端背景板和网带在图像坐标中的四角多边形。
+
+    返回 (backdrop_poly, net_poly)，各为 [[x,y], ...] 列表（4 点，顺时针）。
+    """
+    P = compute_camera_P(H, width, height)
+
+    def project(pts3d):
+        pts3d = np.array(pts3d, dtype=np.float64)
+        ph = np.hstack([pts3d, np.ones((len(pts3d), 1))])
+        uv = (P @ ph.T).T
+        return [[float(p[0] / p[2]), float(p[1] / p[2])] for p in uv]
+
+    backdrop_poly = project([
+        [-CLEARANCE_SIDE,        -CLEARANCE_BACK, 0],
+        [COURT_W+CLEARANCE_SIDE, -CLEARANCE_BACK, 0],
+        [COURT_W+CLEARANCE_SIDE, -CLEARANCE_BACK, BACKDROP_H],
+        [-CLEARANCE_SIDE,        -CLEARANCE_BACK, BACKDROP_H],
+    ])
+    net_poly = project([
+        [-NET_POST_OFF,        NET_Y, 0],
+        [COURT_W+NET_POST_OFF, NET_Y, 0],
+        [COURT_W+NET_POST_OFF, NET_Y, NET_H_POST],
+        [-NET_POST_OFF,        NET_Y, NET_H_POST],
+    ])
+    return backdrop_poly, net_poly
+
 
 # ── 球场线段定义：(端点1, 端点2, 线宽_m) ─────────────────────
 # 注：坐标为线条中心线坐标（各线已向场内偏移半个线宽，使外缘对齐尺寸）

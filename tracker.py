@@ -12,8 +12,9 @@
 类
 ----
   Tracker       — 多目标追踪器，逐帧调用 step(detections, frame_idx)
-  BallTracker   — 封装 Tracker，加网球专用预过滤 + gap 线性插值
-  PlayerTracker — 封装 Tracker，以脚点（bbox 底部中心）为追踪锚点
+  BallTracker   — 离线网球追踪：前过滤（形状/孤立点/静态误检）→ 运动追踪 → 后过滤
+  PlayerTracker — 球员追踪器，以检测框底部中心（脚点）为追踪锚点
+  RacketTracker — 球拍追踪器
 """
 
 import os
@@ -21,24 +22,32 @@ import cv2
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-# 次检测器裁图参数（与 yolo26n-ball.pt 训练 imgsz 一致）
-_RECALL_PATCH  = 96   # recall 裁图边长（px）
-_SUB_IMGSZ     = 96   # 次检测器推断尺寸
-
-
-# ── 物理常量 ──────────────────────────────────────────────────────────────────
+# ── 物理常量（网球）─────────────────────────────────────────────────────────
 
 _BALL_D_M        = 0.067   # ITF 网球直径（m）
-_MAX_SPEED_MS    = 41.7    # 最大球速上限 150 km/h（m/s），用于 max_dist 兜底截断
+_MAX_SPEED_MS    = 41.7    # 最大球速 150 km/h（m/s），用于 max_dist 兜底截断
 _RADIUS_MARGIN   = 1.3     # max_dist 安全裕量系数
 _BBOX_MIN_FACTOR = 0.5     # min_area = (ball_d_px × 系数)²
 _BBOX_MAX_FACTOR = 15.0    # max_area = (ball_d_px × 系数)²
-_GAP_SECONDS      = 0.25   # max_age 对应时长（s）
-_MIN_HIT_SECONDS  = 0.05   # min_hits 对应时长（s）
+_GAP_SECONDS     = 0.25    # max_age 对应时长（s）
+_MIN_HIT_SECONDS = 0.05    # min_hits 对应时长（s）
 _SEARCH_DIAMETERS = 3.0    # 搜索半径 = N × 球径
-_LINEAR_WINDOW    = 3      # 预测时只使用最近 N 个历史点估计速度方向
-_HIST_BINS        = 16     # HSV H 通道直方图 bin 数
-_HIST_MOMENTUM    = 0.8    # 直方图 EMA 系数：新值权重 = 1 - momentum
+
+# ── 追踪器通用常量 ────────────────────────────────────────────────────────────
+
+_LINEAR_WINDOW = 3      # 线性预测：仅取最近 N 个历史点估计速度方向
+_HIST_BINS     = 16     # HSV H 通道直方图 bin 数
+_HIST_MOMENTUM = 0.8    # 直方图 EMA 系数：旧值权重
+
+# ── 前过滤：静态误检 ──────────────────────────────────────────────────────────
+
+_STATIC_IOU_THRESH = 0.5   # 背景板静态误检：bbox IoU 下限
+_STATIC_MIN_GAP_S  = 2.0   # 背景板静态误检：帧差下限（秒），排除同一次击球的连续帧
+_STATIC_MIN_COUNT  = 5     # 背景板静态误检：远距离匹配次数下限（避免偶发误判）
+
+# ── 次检测器（recall）────────────────────────────────────────────────────────
+
+_RECALL_PATCH = 96   # recall 裁图边长及推断尺寸（px），与 yolo26n-ball.pt 训练 imgsz 一致
 
 
 # ── 状态枚举 ─────────────────────────────────────────────────────────────────
@@ -116,6 +125,8 @@ class _LinearTrack:
         self.last_det           = det
         self._next_frame        = frame_idx + 1
         self._pred              = (ax, ay)
+        self._pred2             = (ax, ay)
+        self.near_racket: bool  = False   # 本帧预测中心落在球拍 bbox 内，匹配门限扩至 max_dist
         self.hist               = det.get('hist')  # HSV H-channel histogram, or None
 
     @property
@@ -128,8 +139,13 @@ class _LinearTrack:
 
     @property
     def effective_gate(self) -> float:
-        """搜索门限：search_diameters=None（固定门限模式）或仅 1 个历史点时用 max_dist；
-        否则用 search_radius。"""
+        """搜索门限：
+        - near_racket=True → 可能发生击球转折，退化到 max_dist 全向搜索
+        - search_diameters=None（固定门限模式）或仅 1 个历史点 → max_dist
+        - 否则 → search_radius（物理约束小圆）
+        """
+        if self.near_racket and self._max_dist is not None:
+            return self._max_dist
         if self._search_diameters is None or (len(self.history) == 1 and self._max_dist is not None):
             return self._max_dist
         return self.search_radius
@@ -138,7 +154,8 @@ class _LinearTrack:
         """更新预测位置，age+1。
         use_prediction=True：线性外推；False：停在上一帧位置。"""
         if not self._use_prediction:
-            self._pred = (self.history[-1][1], self.history[-1][2])
+            self._pred  = (self.history[-1][1], self.history[-1][2])
+            self._pred2 = self._pred
             self.age        += 1
             self._next_frame += 1
             return
@@ -153,7 +170,14 @@ class _LinearTrack:
         deg = min(1, len(h) - 1)
         px = np.polyfit(tn[-w:], xs[-w:], deg)
         py = np.polyfit(tn[-w:], ys[-w:], deg)
-        self._pred       = (float(np.polyval(px, tp)), float(np.polyval(py, tp)))
+        self._pred = (float(np.polyval(px, tp)), float(np.polyval(py, tp)))
+        # 次预测：仅取最近2点外推，对转折（落地弹起、击球）更敏感
+        if len(h) >= 2:
+            px2 = np.polyfit(tn[-2:], xs[-2:], 1)
+            py2 = np.polyfit(tn[-2:], ys[-2:], 1)
+            self._pred2 = (float(np.polyval(px2, tp)), float(np.polyval(py2, tp)))
+        else:
+            self._pred2 = self._pred
         self.age        += 1
         self._next_frame += 1
 
@@ -180,6 +204,11 @@ class _LinearTrack:
     @property
     def predicted_center(self):
         return self._pred
+
+    @property
+    def predicted_center2(self):
+        """次预测中心：最近2点线性外推，仅在3+历史点时与 predicted_center 不同。"""
+        return self._pred2
 
 
 # ── 匹配 ─────────────────────────────────────────────────────────────────────
@@ -210,7 +239,8 @@ def _hist_dist(h1, h2):
 
 
 def _match(tracks, dets, max_dist, min_iou=None, anchor_fn=None,
-           size_gate=None, hist_weight=0.0, hist_gate=None):
+           size_gate=None, hist_weight=0.0, hist_gate=None,
+           secondary_centers=None):
     """
     匈牙利算法匹配轨迹与检测。
 
@@ -258,6 +288,11 @@ def _match(tracks, dets, max_dist, min_iou=None, anchor_fn=None,
 
                 dcx, dcy = anchor_fn(d)
                 dist = ((tcx - dcx)**2 + (tcy - dcy)**2) ** 0.5
+                # 次预测：取两个预测圆中较近的距离（并集搜索）
+                if secondary_centers is not None and secondary_centers[i] is not None:
+                    scx, scy = secondary_centers[i]
+                    dist2 = ((scx - dcx)**2 + (scy - dcy)**2) ** 0.5
+                    dist = min(dist, dist2)
                 if dist > gates[i]:
                     continue        # 超出距离门限，硬拒绝，不参与全局分配
                 # 颜色代价调制
@@ -358,10 +393,12 @@ class Tracker:
 
         # 2. 阶段一：所有轨迹 vs 高置信度检测（逐轨迹门限）
         gates1 = [t.effective_gate for t in self._tracks]
+        sec1   = [t.predicted_center2 for t in self._tracks]
         matched1, unmatched_t1, unmatched_d_high = _match(
             self._tracks, dets_high, gates1,
             anchor_fn=self._anchor_fn, size_gate=self._size_gate,
-            hist_weight=self._hist_weight, hist_gate=self._hist_gate)
+            hist_weight=self._hist_weight, hist_gate=self._hist_gate,
+            secondary_centers=sec1)
         for ti, di in matched1:
             self._tracks[ti].update(dets_high[di], frame_idx)
 
@@ -374,10 +411,12 @@ class Tracker:
                                       if self._tracks[ti].state == TrackState.CONFIRMED]
             tracks2 = [self._tracks[ti] for ti in unmatched_t1_confirmed]
             gates2  = [t.effective_gate for t in tracks2]
+            sec2    = [t.predicted_center2 for t in tracks2]
             matched2_local, _, _ = _match(
                 tracks2, dets_low, gates2,
                 anchor_fn=self._anchor_fn, size_gate=self._size_gate,
-                hist_weight=self._hist_weight, hist_gate=self._hist_gate)
+                hist_weight=self._hist_weight, hist_gate=self._hist_gate,
+                secondary_centers=sec2)
             for i2, di2 in matched2_local:
                 ti = unmatched_t1_confirmed[i2]
                 self._tracks[ti].update(dets_low[di2], frame_idx)
@@ -488,23 +527,36 @@ class BallTracker:
     def __init__(self, min_hits=3, max_age=5,
                  conf_high=0.5, conf_low=0.0,
                  search_diameters=_SEARCH_DIAMETERS, max_dist=None,
-                 min_area=20.0, max_area=8000.0, min_aspect=0.3,
+                 min_area=20.0, max_area=8000.0,
+                 min_aspect_h=0.15, min_aspect_v=0.5,
+                 ball_d_px=0.0, fps=25.0, H_inv=None,
+                 backdrop_poly=None,
                  sub_model=None, sub_save_dir=None):
-        self._tracker        = Tracker(min_hits=min_hits, max_age=max_age,
-                                       conf_high=conf_high, conf_low=conf_low,
-                                       search_diameters=search_diameters,
-                                       max_dist=max_dist)
-        self.min_area        = min_area
-        self.max_area        = max_area
-        self.min_aspect      = min_aspect
+        self._tracker = Tracker(min_hits=min_hits, max_age=max_age,
+                                conf_high=conf_high, conf_low=conf_low,
+                                search_diameters=search_diameters,
+                                max_dist=max_dist,
+                                size_gate=2.0)
+        self.min_area     = min_area
+        self.max_area     = max_area
+        self.min_aspect_h = min_aspect_h   # 水平拉长（w≥h）下限：运动模糊允许较大拉伸
+        self.min_aspect_v = min_aspect_v   # 垂直拉长（h>w）下限：竖向模糊罕见，严格限制
+        self._ball_d_px = ball_d_px
+        self._fps       = fps
+        # 背景板判断：优先用 3D 投影多边形，备用单应矩阵反投影
+        self._backdrop_contour = (
+            np.array(backdrop_poly, dtype=np.float32) if backdrop_poly is not None else None
+        )
+        self._H_inv        = H_inv
         self._sub_model    = sub_model
         self._sub_save_dir = sub_save_dir
 
     @classmethod
     def from_video(cls, fps: float, px_per_meter: float,
                    conf_high: float = 0.5, conf_low: float = 0.0,
-                   min_aspect: float = 0.3,
+                   min_aspect_h: float = 0.15, min_aspect_v: float = 0.5,
                    search_diameters: float = _SEARCH_DIAMETERS,
+                   H_inv=None, backdrop_poly=None,
                    sub_model=None, sub_save_dir=None):
         """
         根据帧率和像素/米比例推算各参数。
@@ -533,73 +585,208 @@ class BallTracker:
         return cls(min_hits=min_hits, max_age=max_age,
                    conf_high=conf_high, conf_low=conf_low,
                    search_diameters=search_diameters, max_dist=max_dist,
-                   min_area=min_area, max_area=max_area, min_aspect=min_aspect,
+                   min_area=min_area, max_area=max_area,
+                   min_aspect_h=min_aspect_h, min_aspect_v=min_aspect_v,
+                   ball_d_px=ball_d_px, fps=fps, H_inv=H_inv,
+                   backdrop_poly=backdrop_poly,
                    sub_model=sub_model,
                    sub_save_dir=sub_save_dir)
 
-    def run(self, ball_detections, debug_frame: int = -1, frames=None):
-        """
-        输入：ball_detections[i] = [{'bbox', 'conf', 'track_id'}, ...]
-        输出：同结构，CONFIRMED 轨迹含 track_id(int)，gap 帧线性插值（conf=0.0，interpolated=True）
+    def _in_backdrop(self, det) -> bool:
+        """检测中心是否在远端背景板区域内。"""
+        x1, y1, x2, y2 = det['bbox']
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        if self._backdrop_contour is not None:
+            return cv2.pointPolygonTest(self._backdrop_contour,
+                                        (float(cx), float(cy)), False) >= 0
+        if self._H_inv is not None:
+            pt = cv2.perspectiveTransform(
+                np.array([[[cx, cy]]], dtype=np.float32), self._H_inv)[0][0]
+            return float(pt[1]) < 0   # y_court < 0 → 远端底线以外
+        return True   # 无几何信息时对所有点应用
+
+    # ── 1. 前过滤 ──────────────────────────────────────────────────────────────
+
+    def _prefilter(self, ball_detections, debug_frame=-1):
+        """前过滤：① 尺寸/形状过滤  ② 静态误检过滤。
+
+        ① 尺寸/形状：面积和长宽比不合规的检测直接丢弃。
+        ② 静态误检：背景板区域内的检测，若在整个视频中同位置（IoU > 阈值）
+           累计出现 ≥ MIN_COUNT 次（帧差 > min_gap，且跨度 ≥ min_gap），视为固定误检丢弃。
         """
         n = len(ball_detections)
-        self._tracker.reset()
 
-        # ── 预过滤（尺寸 / 形状）────────────────────────────────────────────
-        candidates   = []
-        dropped_dets = []
+        # ── ① 尺寸/形状过滤 ──────────────────────────────────────────────
+        shape_ok = []
+        dropped  = []
         for fi, dets in enumerate(ball_detections):
-            passed, dropped = [], []
+            passed, fail = [], []
             for d in dets:
-                a, asp = _area(d['bbox']), _aspect(d['bbox'])
-                if self.min_area <= a <= self.max_area and asp >= self.min_aspect:
+                a = _area(d['bbox'])
+                x1, y1, x2, y2 = d['bbox']
+                w, h = x2 - x1, y2 - y1
+                # 方向感知长宽比：水平拉长（运动模糊）宽松，垂直拉长严格
+                if w >= h:
+                    asp_ok = (h / w >= self.min_aspect_h) if w > 0 else False
+                else:
+                    asp_ok = (w / h >= self.min_aspect_v) if h > 0 else False
+                if self.min_area <= a <= self.max_area and asp_ok:
                     passed.append(d)
                 else:
-                    dropped.append(d)
-            candidates.append(passed)
-            dropped_dets.append(dropped)
-            if fi == debug_frame and (passed or dropped):
-                print(f"[dbg f{fi}] prefilter: {len(passed)} passed, {len(dropped)} dropped"
+                    fail.append(d)
+            shape_ok.append(passed)
+            dropped.append(fail)
+            if fi == debug_frame and (passed or fail):
+                print(f"[dbg f{fi}] prefilter shape: {len(passed)} passed, {len(fail)} dropped"
                       f"  (area∈[{self.min_area:.0f},{self.max_area:.0f}]"
-                      f"  asp>={self.min_aspect})")
-                for d in dropped:
-                    a2, asp2 = _area(d['bbox']), _aspect(d['bbox'])
-                    print(f"           DROPPED  conf={d['conf']:.3f}  area={a2:.0f}  asp={asp2:.2f}")
+                      f"  asp_h>={self.min_aspect_h} asp_v>={self.min_aspect_v})")
+                for d in fail:
+                    print(f"           DROPPED  conf={d['conf']:.3f}"
+                          f"  area={_area(d['bbox']):.0f}  asp={_aspect(d['bbox']):.2f}")
                 for d in passed:
-                    print(f"           passed   conf={d['conf']:.3f}  area={_area(d['bbox']):.0f}"
-                          f"  asp={_aspect(d['bbox']):.2f}")
+                    print(f"           passed   conf={d['conf']:.3f}"
+                          f"  area={_area(d['bbox']):.0f}  asp={_aspect(d['bbox']):.2f}")
 
-        # ── 逐帧追踪 ─────────────────────────────────────────────────────────
-        tracked       = []
-        frame_iter    = iter(frames) if frames is not None else None
-        use_sub = frame_iter is not None and self._sub_model is not None
+        n_after_shape = sum(len(f) for f in shape_ok)
+        # 孤立点过滤已移除：孤立检测无法满足 min_hits 形成 CONFIRMED 轨迹，
+        # tracker 自然淘汰；parse.py 再移除无 track_id 的检测。
+        # 保留孤立检测还能帮助已有轨迹在漏检帧续接。
+        iso_ok = shape_ok
 
-        # 统计计数器（仅在启用次检测器时有意义）
-        rcl_tried    = 0   # 对未匹配 CONFIRMED 轨迹发起 recall 的次数
-        rcl_found    = 0   # recall 成功找到网球的次数
+        # ── ③ 静态误检过滤（仅限远端背景板区域）────────────────────────
+        # 背景板是固定误检高发区：广告牌、场地标志等在整个视频中反复出现在相近位置。
+        # 判断条件：同位置（IoU > 阈值）在帧差 > min_gap 的帧中累计匹配 >= MIN_COUNT 次
+        min_gap = max(1, round(self._fps * _STATIC_MIN_GAP_S))
+
+        # 收集背景板区域内的检测：(frame_idx, x1, y1, x2, y2, det_id)
+        bd_rows = []   # List of [fi, x1, y1, x2, y2, det_id]
+        for fi, dets in enumerate(iso_ok):
+            for d in dets:
+                if not self._in_backdrop(d):
+                    continue
+                x1, y1, x2, y2 = d['bbox']
+                bd_rows.append((fi, x1, y1, x2, y2, id(d)))
+
+        if bd_rows:
+            arr = np.array([(r[0], r[1], r[2], r[3], r[4]) for r in bd_rows],
+                           dtype=np.float32)
+            arr_fi, arr_x1, arr_y1, arr_x2, arr_y2 = arr.T
+            arr_area = (arr_x2 - arr_x1) * (arr_y2 - arr_y1)
+            det_ids  = [r[5] for r in bd_rows]
+            static_ids: set[int] = set()
+            for i in range(len(det_ids)):
+                far   = np.abs(arr_fi - arr_fi[i]) > min_gap
+                ix1   = np.maximum(arr_x1, arr_x1[i])
+                iy1   = np.maximum(arr_y1, arr_y1[i])
+                ix2   = np.minimum(arr_x2, arr_x2[i])
+                iy2   = np.minimum(arr_y2, arr_y2[i])
+                inter = np.maximum(0, ix2 - ix1) * np.maximum(0, iy2 - iy1)
+                union = arr_area + arr_area[i] - inter
+                iou   = inter / np.maximum(union, 1e-6)
+                mask = far & (iou > _STATIC_IOU_THRESH)
+                # 匹配帧必须在时间上分散（跨度 >= min_gap），排除"另一条真实球轨迹恰好经过同位置"的情况
+                if np.sum(mask) >= _STATIC_MIN_COUNT and (arr_fi[mask].max() - arr_fi[mask].min()) >= min_gap:
+                    static_ids.add(det_ids[i])
+            n_static = len(static_ids)
+            candidates = []
+            for fi in range(len(iso_ok)):
+                keep, fail = [], []
+                for d in iso_ok[fi]:
+                    (fail if id(d) in static_ids else keep).append(d)
+                candidates.append(keep)
+                dropped[fi].extend(fail)
+        else:
+            n_static = 0
+            candidates = iso_ok
+
+        n_raw          = sum(len(f) for f in ball_detections)
+        n_after_static = sum(len(f) for f in candidates)
+        print(f"[prefilter] raw={n_raw}"
+              f"  →shape→ {n_after_shape} (-{n_raw - n_after_shape})"
+              f"  →static→ {n_after_static} (-{n_static})"
+              f"  (iou>{_STATIC_IOU_THRESH}  min_gap={min_gap}f  min_count={_STATIC_MIN_COUNT})")
+
+        return candidates, dropped
+
+    # ── 2. 运动跟踪 ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _point_in_racket(cx, cy, frame_rackets):
+        """判断点 (cx, cy) 是否落在任意球拍 bbox 内。"""
+        for r in (frame_rackets or []):
+            x1, y1, x2, y2 = r['bbox']
+            if x1 <= cx <= x2 and y1 <= cy <= y2:
+                return True
+        return False
+
+    def _track(self, candidates, debug_frame, frames, n, rackets=None):
+        """运动跟踪：逐帧 Tracker + Recall 补检 + TENTATIVE 回填。
+
+        rackets : list[list[det]]，逐帧球拍检测（可为 None）。
+                  当球的预测中心落在球拍 bbox 内时，视为可能发生击球转折，
+                  匹配门限扩至 max_dist，并在 frame_predictions 中记录大圆 r_max。
+
+        返回 (tid_frames, tracked, frame_predictions)：
+          tid_frames        — {track_id: [(frame_idx, det), ...]}（已含 TENTATIVE 回填）
+          tracked           — 逐帧 Tracker 原始输出，供后续保留未追踪检测使用
+          frame_predictions — 每帧活跃轨迹的预测圆列表
+                              [  # frame 0
+                                [{"tid":1,"cx":x,"cy":y,"r":r,
+                                  "cx2":x2,"cy2":y2,         # 可选，次预测
+                                  "r_max":rmax               # 可选，击球转折大圆
+                                 }, ...],
+                                ...
+                              ]
+        """
+        tracked           = []
+        frame_predictions = []
+        frame_iter = iter(frames) if frames is not None else None
+        use_sub    = frame_iter is not None and self._sub_model is not None
+        rcl_tried  = rcl_found = 0
 
         for fi, frame_dets in enumerate(candidates):
             frame = next(frame_iter) if frame_iter is not None else None
+            frame_rackets = rackets[fi] if rackets is not None and fi < len(rackets) else None
 
-            # ── 阶段一：预测 ─────────────────────────────────────────────────
-            # 更新所有轨迹的预测位置（predicted_center）和 age。
-            # 须在验证替换和 Recall 之前完成，两者都依赖本帧预测位置。
             self._tracker.predict_all()
+
+            # predict_all() 之后：标记球拍感知，再记录搜索圆
+            for t in self._tracker._tracks:
+                cx, cy = t.predicted_center
+                t.near_racket = self._point_in_racket(cx, cy, frame_rackets)
+
+            # 记录所有活跃轨迹的预测圆（含 TENTATIVE）
+            preds = []
+            for t in self._tracker._tracks:
+                cx,  cy  = t.predicted_center
+                cx2, cy2 = t.predicted_center2
+                # 显示半径：用正常搜索半径（不受 near_racket 影响），保留方向信息
+                if t._search_diameters is not None and len(t.history) >= 2:
+                    display_r = t.search_radius
+                else:
+                    display_r = t._max_dist or t.search_radius
+                entry = {
+                    'tid': t.id,
+                    'cx':  round(float(cx),  1),
+                    'cy':  round(float(cy),  1),
+                    'r':   round(float(display_r), 1),
+                }
+                # 次预测圆：仅在与主预测有明显差异时（≥3 个历史点）才存储
+                if len(t.history) >= 3 and (abs(cx2 - cx) > 0.5 or abs(cy2 - cy) > 0.5):
+                    entry['cx2'] = round(float(cx2), 1)
+                    entry['cy2'] = round(float(cy2), 1)
+                # 球拍感知大圆：击球转折时额外叠加全向 max_dist 搜索圆
+                if t.near_racket and t._max_dist is not None:
+                    entry['r_max'] = round(float(t._max_dist), 1)
+                preds.append(entry)
+            frame_predictions.append(preds)
 
             if use_sub:
                 h, w = frame.shape[:2]
-
-                # ── 阶段二：Recall（找回缺失检测点）─────────────────────────
-                # 每条 CONFIRMED 轨迹在预测位置附近寻找检测点：
-                #   - effective_gate 内已有检测点 → 无需 recall
-                #   - 未找到检测点 → 在预测位置运行次检测器补检
-                # recall 结果若与已有检测点 IoU > 0.3，视为同一球，
-                # 不追加（已有检测点参与后续匹配），并打印提示。
                 for t in self._tracker._tracks:
                     if t.state != TrackState.CONFIRMED:
                         continue
                     tcx, tcy = t.predicted_center
-                    # 预测位置附近已有检测点，无需 recall
                     if any(((tcx - _center(d['bbox'])[0])**2 +
                             (tcy - _center(d['bbox'])[1])**2) ** 0.5 <= t.effective_gate
                            for d in frame_dets):
@@ -613,30 +800,24 @@ class BallTracker:
                                         if _iou(rdet['bbox'], d['bbox']) > 0.3), None)
                         b = [round(v) for v in rdet['bbox']]
                         bbox_str = f"[{b[0]:4d},{b[1]:4d},{b[2]:4d},{b[3]:4d}]"
-                        hdr = f"\033[1;32m[recall] f{fi:<5} tid={t.id:<3}  bbox={bbox_str}  conf={rdet['conf']:.3f}"
+                        hdr = (f"\033[1;32m[recall] f{fi:<5} tid={t.id:<3}"
+                               f"  bbox={bbox_str}  conf={rdet['conf']:.3f}")
                         if overlap is not None:
-                            iou_val = _iou(rdet['bbox'], overlap['bbox'])
-                            print(f"{hdr}  iou={iou_val:.3f}  → 已知点，不续接\033[0m")
+                            print(f"{hdr}  iou={_iou(rdet['bbox'], overlap['bbox']):.3f}"
+                                  f"  → 已知点，不续接\033[0m")
                             continue
-                        # IoU <= 0.3 但仍有轻微重叠的情形：高亮提示
                         near = next((d for d in frame_dets
                                      if 0 < _iou(rdet['bbox'], d['bbox']) <= 0.3), None)
                         if near is not None:
-                            print(f"{hdr}  WARNING low iou={_iou(rdet['bbox'], near['bbox']):.3f} "
-                                  f"with existing conf={near.get('conf', 0.0):.3f}\033[0m")
+                            print(f"{hdr}  WARNING low iou={_iou(rdet['bbox'], near['bbox']):.3f}"
+                                  f"  existing conf={near.get('conf', 0.0):.3f}\033[0m")
                         rcl_found += 1
                         print(f"{hdr}\033[0m")
                         frame_dets.append(dict(rdet, _recall=True))
 
-            # ── 阶段三：追踪 ─────────────────────────────────────────────────
-            # 预测已在阶段一完成，skip_predict=True 避免重复预测。
-            # frame_dets 包含主检测器原始结果及 recall 补检点，
-            # step() 按统一的 conf_high/conf_low 逻辑做匹配。
             result = self._tracker.step(frame_dets, fi, skip_predict=True)
-
             tracked.append(result)
 
-            # ── 调试输出 ─────────────────────────────────────────────────────
             if fi == debug_frame:
                 tr = self._tracker
                 n_high = sum(1 for d in frame_dets if d.get('conf', 1.0) >= tr.conf_high)
@@ -659,7 +840,7 @@ class BallTracker:
             print(f"[ recall ] tried={rcl_tried}  found={rcl_found}"
                   + (f"  ({rcl_found/rcl_tried*100:.1f}%)" if rcl_tried else ""))
 
-        # ── 收集各 track_id 的检测点（含 TENTATIVE 回填）────────────────────
+        # ── TENTATIVE 回填 ────────────────────────────────────────────────
         tid_frames: dict[int, list] = {}
         tentative_hist: dict[int, list] = {}
         for fi, frame_dets in enumerate(tracked):
@@ -674,13 +855,34 @@ class BallTracker:
         for tid in list(tid_frames.keys()):
             if tid not in tentative_hist:
                 continue
-            confirmed_frames = {fi for fi, _ in tid_frames[tid]}
+            # 确认帧 = tid_frames 中最早的帧（轨迹首次 CONFIRMED 的帧）
+            confirmation_frame = min(fi for fi, _ in tid_frames[tid])
+            confirmed_frames   = {fi for fi, _ in tid_frames[tid]}
             prepend = [(fi, det) for fi, det in tentative_hist[tid]
                        if fi not in confirmed_frames]
             if prepend:
+                for _, det in prepend:
+                    det['backfill']    = True
+                    det['revealed_at'] = confirmation_frame
                 tid_frames[tid] = sorted(prepend + tid_frames[tid], key=lambda x: x[0])
 
-        # ── Gap 线性插值，写入 output ─────────────────────────────────────────
+        n_cands   = sum(len(f) for f in candidates)
+        n_tracked = sum(len(v) for v in tid_frames.values())
+        print(f"[  track  ] candidates={n_cands}  tracks={len(tid_frames)}"
+              f"  dets={n_tracked}")
+
+        return tid_frames, tracked, frame_predictions
+
+    # ── 3. 后过滤 ──────────────────────────────────────────────────────────────
+
+    def _postfilter(self, tid_frames):
+        """后过滤：（未实现）"""
+        return tid_frames
+
+    # ── 组装输出 ────────────────────────────────────────────────────────────────
+
+    def _build_output(self, tid_frames, tracked, dropped_dets, n):
+        """Gap 线性插值 + 合并 dropped / 未追踪检测，组装逐帧输出列表。"""
         def _clean(det, **overrides):
             d = {k: v for k, v in det.items() if k != '_tid'}
             d.update(overrides)
@@ -704,36 +906,59 @@ class BallTracker:
                         alpha = t / gap
                         cx = cx_a + alpha * (cx_b - cx_a)
                         cy = cy_a + alpha * (cy_b - cy_a)
-                        interp = {
+                        output[fi_a + t].append({
                             'bbox': [cx - w/2, cy - h/2, cx + w/2, cy + h/2],
-                            'conf': 0.0, 'track_id': tid, 'interpolated': True,
-                        }
-                        output[fi_a + t].append(interp)
+                            'conf': 0.0, 'track_id': tid,
+                            'interpolated': True, 'revealed_at': fi_b,
+                        })
             fi_last, det_last = frames[-1]
             output[fi_last].append(_clean(det_last, track_id=tid))
 
-        # ── 保留未被追踪的检测（供可视化）───────────────────────────────────
         backfilled: set[int] = set()
-        for tid, frames in tid_frames.items():
+        for frames in tid_frames.values():
             for fi, det in frames:
                 if det.get('track_id') is None:
                     backfilled.add(id(det))
 
         for fi, dets in enumerate(dropped_dets):
             for det in dets:
-                output[fi].append(_clean(det, track_id=None))
+                output[fi].append(_clean(det, track_id=None, valid=False))
         for fi, frame_dets in enumerate(tracked):
             for det in frame_dets:
                 if det.get('track_id') is None and id(det) not in backfilled:
                     output[fi].append(_clean(det, track_id=None))
 
-        n_raw     = sum(len(f) for f in ball_detections)
-        n_filtered = sum(len(f) for f in candidates)
-        n_tracked  = sum(len(v) for v in tid_frames.values())
-        print(f"[ tracker] raw={n_raw}  filtered={n_filtered}  "
-              f"tracks={len(tid_frames)}  confirmed_dets={n_tracked}")
-
         return output
+
+    # ── 主入口 ──────────────────────────────────────────────────────────────────
+
+    def run(self, ball_detections,
+            rackets=None, players=None, court=None,
+            debug_frame: int = -1, frames=None):
+        """
+        输入：
+          ball_detections — 逐帧网球检测列表
+          rackets         — 逐帧球拍检测列表（可为 None）；用于球拍感知预测扩圆
+          players         — 逐帧球员检测列表（可为 None）；预留，暂未使用
+          court           — 球场信息 dict（可为 None）；预留，暂未使用
+        输出：(balls, frame_predictions)
+          balls             — 同输入结构，CONFIRMED 轨迹含 track_id(int)，gap 帧线性插值
+          frame_predictions — 每帧轨迹的预测圆列表，供 check_json.py 直接渲染
+        """
+        n = len(ball_detections)
+        self._tracker.reset()
+
+        # ── 1. 前过滤 ────────────────────────────────────────────────────
+        candidates, dropped_dets = self._prefilter(ball_detections, debug_frame)
+
+        # ── 2. 运动跟踪 ──────────────────────────────────────────────────
+        tid_frames, tracked, frame_predictions = self._track(
+            candidates, debug_frame, frames, n, rackets=rackets)
+
+        # ── 3. 后过滤 ────────────────────────────────────────────────────
+        tid_frames = self._postfilter(tid_frames)
+
+        return self._build_output(tid_frames, tracked, dropped_dets, n), frame_predictions
 
 
 # ── 球员追踪器 ────────────────────────────────────────────────────────────────

@@ -98,7 +98,7 @@ _CAT_ID = {'person': 1, 'tennis racket': 2, 'sports ball': 3}
 
 def _serialize_court(court):
     """将 court dict 的 numpy 数组序列化为 JSON 可写格式。"""
-    return {
+    out = {
         'keypoints':        np.array(court['keypoints']).reshape(14, 2).tolist(),
         'ground_hull':      np.array(court['ground_hull']).reshape(-1, 2).tolist(),
         'volume_hull':      np.array(court['volume_hull']).reshape(-1, 2).tolist(),
@@ -107,11 +107,16 @@ def _serialize_court(court):
         'court_bottom_pts': np.array(court['court_bottom_pts']).tolist(),
         'court_top_pts':    np.array(court['court_top_pts']).tolist(),
     }
+    if 'backdrop_poly' in court and court['backdrop_poly'] is not None:
+        out['backdrop_poly'] = court['backdrop_poly']
+    if 'net_poly' in court and court['net_poly'] is not None:
+        out['net_poly'] = court['net_poly']
+    return out
 
 
 def _deserialize_court(raw):
     """将 JSON 中的 court dict 恢复为 numpy 数组。"""
-    return {
+    out = {
         'keypoints':        np.array(raw['keypoints'],        dtype=np.float32).flatten(),
         'ground_hull':      np.array(raw['ground_hull'],      dtype=np.float32).reshape(-1, 1, 2),
         'volume_hull':      np.array(raw['volume_hull'],      dtype=np.float32).reshape(-1, 1, 2),
@@ -120,25 +125,30 @@ def _deserialize_court(raw):
         'court_bottom_pts': np.array(raw['court_bottom_pts'], dtype=np.float32),
         'court_top_pts':    np.array(raw['court_top_pts'],    dtype=np.float32),
     }
+    if 'backdrop_poly' in raw:
+        out['backdrop_poly'] = raw['backdrop_poly']
+    if 'net_poly' in raw:
+        out['net_poly'] = raw['net_poly']
+    return out
 
 
-def save_coco(width, height, players, rackets, balls, path, fps=None, court=None, video=None):
+def save_coco(width, height, players, rackets, balls, path,
+              fps=None, court=None, video=None, frame_predictions=None):
     """
     将检测结果保存为 COCO JSON。
 
-    width/height : 视频帧尺寸（像素）
-    court        : dict，包含球场关键点和缓冲区凸包（可选）：
-                     keypoints      ndarray (28,)    — 14 个关键点
-                     ground_hull    ndarray (4,1,2)  — 地面缓冲区四边形
-                     volume_hull    ndarray (N,1,2)  — 立方体凸包
-                     vol_bottom_pts ndarray (4,2)    — 立方体底面角点
-                     vol_top_pts    ndarray (4,2)    — 立方体顶面角点
+    frame_predictions : list[list[dict]]，每帧 CONFIRMED 轨迹的预测圆
+                        [{"tid":int,"cx":float,"cy":float,"r":float}, ...]
+                        写入对应 image 的 "ball_predictions" 字段
     """
     images, annotations = [], []
     annotation_id = 0
 
     for frame_id, (player_dets, racket_dets, ball_dets) in enumerate(zip(players, rackets, balls)):
-        images.append({'id': frame_id, 'width': width, 'height': height, 'frame_id': frame_id})
+        img = {'id': frame_id, 'width': width, 'height': height, 'frame_id': frame_id}
+        if frame_predictions and frame_id < len(frame_predictions) and frame_predictions[frame_id]:
+            img['ball_predictions'] = frame_predictions[frame_id]
+        images.append(img)
         for category_name, dets in [('person', player_dets), ('tennis racket', racket_dets), ('sports ball', ball_dets)]:
             for det in dets:
                 x1, y1, x2, y2 = det['bbox']
@@ -156,6 +166,10 @@ def save_coco(width, height, players, rackets, balls, path, fps=None, court=None
                     ann['track_id'] = det['track_id']
                 if det.get('interpolated'):
                     ann['interpolated'] = True
+                if 'revealed_at' in det:
+                    ann['revealed_at'] = det['revealed_at']
+                if det.get('backfill'):
+                    ann['backfill'] = True
                 if det.get('_recall'):
                     ann['recall'] = True
                 if det.get('validated'):
@@ -264,6 +278,10 @@ def load_detections(path):
         }
         if ann.get('interpolated'):
             det['interpolated'] = True
+        if 'revealed_at' in ann:
+            det['revealed_at'] = ann['revealed_at']
+        if ann.get('backfill'):
+            det['backfill'] = True
         if ann.get('recall'):
             det['recall'] = True
         if ann.get('validated'):
