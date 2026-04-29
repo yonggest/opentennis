@@ -614,8 +614,6 @@ class BallTracker:
         ② 静态误检：背景板区域内的检测，若在整个视频中同位置（IoU > 阈值）
            累计出现 ≥ MIN_COUNT 次（帧差 > min_gap，且跨度 ≥ min_gap），视为固定误检丢弃。
         """
-        n = len(ball_detections)
-
         # ── ① 尺寸/形状过滤 ──────────────────────────────────────────────
         shape_ok = []
         dropped  = []
@@ -653,7 +651,7 @@ class BallTracker:
         # 保留孤立检测还能帮助已有轨迹在漏检帧续接。
         iso_ok = shape_ok
 
-        # ── ③ 静态误检过滤（仅限远端背景板区域）────────────────────────
+        # ── ② 静态误检过滤（仅限远端背景板区域）────────────────────────
         # 背景板是固定误检高发区：广告牌、场地标志等在整个视频中反复出现在相近位置。
         # 判断条件：同位置（IoU > 阈值）在帧差 > min_gap 的帧中累计匹配 >= MIN_COUNT 次
         min_gap = max(1, round(self._fps * _STATIC_MIN_GAP_S))
@@ -719,7 +717,7 @@ class BallTracker:
                 return True
         return False
 
-    def _track(self, candidates, debug_frame, frames, n, rackets=None):
+    def _track(self, candidates, debug_frame, frames, rackets=None):
         """运动跟踪：逐帧 Tracker + Recall 补检 + TENTATIVE 回填。
 
         rackets : list[list[det]]，逐帧球拍检测（可为 None）。
@@ -953,7 +951,7 @@ class BallTracker:
 
         # ── 2. 运动跟踪 ──────────────────────────────────────────────────
         tid_frames, tracked, frame_predictions = self._track(
-            candidates, debug_frame, frames, n, rackets=rackets)
+            candidates, debug_frame, frames, rackets=rackets)
 
         # ── 3. 后过滤 ────────────────────────────────────────────────────
         tid_frames = self._postfilter(tid_frames)
