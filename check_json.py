@@ -711,6 +711,8 @@ class BrowseApp(QMainWindow):
                 label = f"P{track_id}"
             elif cid in self.racket_cids and track_id is not None:
                 label = f"R{track_id}"
+            elif is_ball and track_id is not None:
+                label = f"B{track_id}"
             else:
                 label = self.category_labels.get(cid, "?")
             score = ann.get("score")
@@ -769,14 +771,14 @@ class BrowseApp(QMainWindow):
                 ).setZValue(0)
 
         # 地面缓冲区轮廓
-        ground_hull = self.court["ground_hull"]
-        poly = QPolygonF([QPointF(p[0], p[1]) for p in ground_hull])
+        ground_poly = self.court["ground_poly"]
+        poly = QPolygonF([QPointF(p[0], p[1]) for p in ground_poly])
         self.scene.addPolygon(poly, court_pen, QBrush(Qt.NoBrush)).setZValue(0)
 
         # 双打侧线立方体（球员过滤边界）：遮罩 + 线框，与缓冲区显示方式一致
         # 先画内墙，再画外墙，遮罩从内到外叠加
-        c_bot = self.court["court_bottom_pts"]
-        c_top = self.court["court_top_pts"]
+        c_bot = self.court["court_floor_pts"]
+        c_top = self.court["court_ceil_pts"]
         self._render_outside_masks(c_bot, c_top)
         for i in range(4):
             j = (i + 1) % 4
@@ -785,8 +787,8 @@ class BrowseApp(QMainWindow):
             self.scene.addLine(c_bot[i][0], c_bot[i][1], c_top[i][0], c_top[i][1], sideline_pen).setZValue(1)
 
         # 缓冲区立方体线框 + 侧边外部遮罩
-        vol_bot = self.court["vol_bottom_pts"]
-        vol_top = self.court["vol_top_pts"]
+        vol_bot = self.court["floor_pts"]
+        vol_top = self.court["ceil_pts"]
         self._render_outside_masks(vol_bot, vol_top)
         for i in range(4):
             j = (i + 1) % 4
@@ -876,7 +878,7 @@ class BrowseApp(QMainWindow):
         self.scene.addPolygon(right_poly, no_pen, mask_brush).setZValue(0.5)
 
     def _build_ball_trajectories(self) -> dict[int, list[tuple]]:
-        """返回 {track_id: [(frame_idx, cx, cy, revealed_at), ...]}。
+        """返回 {track_id: [(frame_idx, cx, cy, revealed_at, valid), ...]}。
 
         仅含已追踪（track_id != None）的网球标注。
         """
@@ -889,7 +891,7 @@ class BrowseApp(QMainWindow):
                 x, y, w, h = ann["bbox"]
                 cx, cy = x + w / 2, y + h / 2
                 traj.setdefault(tid, []).append(
-                    (frame_idx, cx, cy, ann.get("revealed_at")))
+                    (frame_idx, cx, cy, ann.get("revealed_at"), ann.get("valid", True)))
         for pts in traj.values():
             pts.sort(key=lambda t: t[0])
         return traj
@@ -908,7 +910,7 @@ class BrowseApp(QMainWindow):
         result: dict[int, list] = {}
         for tid, pts in self._ball_traj.items():
             court_pts = []
-            for fi, cx, cy, _rev in pts:
+            for fi, cx, cy, _rev, _valid in pts:
                 xy = self._project_to_court(cx, cy)
                 if xy:
                     court_pts.append((fi, xy[0], xy[1]))
@@ -977,7 +979,7 @@ class BrowseApp(QMainWindow):
         for tid, pts in self._ball_traj.items():
             color = self._ball_traj_color(tid)
             prev = None
-            for frame_idx, cx, cy, revealed_at in pts:
+            for frame_idx, cx, cy, revealed_at, valid in pts:
                 if frame_idx > cur:
                     break
                 if revealed_at is not None and revealed_at > cur:
@@ -985,8 +987,12 @@ class BrowseApp(QMainWindow):
                 if prev is not None:
                     pf, px, py = prev
                     alpha = int(255 * max(0.2, 1.0 - (cur - frame_idx) / _BALL_TRAJ_FADE_FRAMES))
-                    seg_c = QColor(color); seg_c.setAlpha(alpha)
-                    seg_pen = QPen(seg_c, 2); seg_pen.setCosmetic(True)
+                    if valid:
+                        seg_c = QColor(color); seg_c.setAlpha(alpha)
+                        seg_pen = QPen(seg_c, 2); seg_pen.setCosmetic(True)
+                    else:
+                        seg_c = QColor(120, 120, 120, max(60, alpha // 2))
+                        seg_pen = QPen(seg_c, 1); seg_pen.setCosmetic(True)
                     _add_arrowed_line(self.scene, px, py, cx, cy, seg_pen)
                 prev = (frame_idx, cx, cy)
 

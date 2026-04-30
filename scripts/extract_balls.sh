@@ -3,7 +3,7 @@
 #
 # 输入：.tracked.json 文件
 # 输出：四个子目录，与输入文件同级
-#   <stem>_正常样本   — 所有位置、所有类别、高置信度正常样本
+#   <stem>_正常样本   — 所有位置、高置信度网球样本
 #   <stem>_插值背景   — 背景板附近的插值网球
 #   <stem>_插值网带   — 网带附近的插值网球
 #   <stem>_插值球拍   — 球拍附近的插值网球
@@ -39,14 +39,14 @@ run() {
   echo ""
   echo "── $label"
   echo "   → $out_dir"
-  echo -e "   \033[1;32m$\033[0m \033[1;33m.venv/bin/python extract_object.py\033[0m $* -o \"$out_dir\""
-  .venv/bin/python extract_object.py "$@" -o "$out_dir"
+  echo -e "   \033[1;32m$\033[0m \033[1;33m.venv/bin/python extract_pos_balls.py\033[0m $* -o \"$out_dir\""
+  .venv/bin/python extract_pos_balls.py "$@" -o "$out_dir"
 }
 
 run "正常样本" -i "$JSON" -p all    --sample high-conf
-run "插值背景" -i "$JSON" -p backdrop --sample interpolated --category "sports ball"
-run "插值网带" -i "$JSON" -p net      --sample interpolated --category "sports ball"
-run "插值球拍" -i "$JSON" -p racket   --sample interpolated --category "sports ball"
+run "插值背景" -i "$JSON" -p backdrop --sample interpolated
+run "插值网带" -i "$JSON" -p net      --sample interpolated
+run "插值球拍" -i "$JSON" -p racket   --sample interpolated
 
 echo ""
 echo "════════════════════════════════════════════════════════════"

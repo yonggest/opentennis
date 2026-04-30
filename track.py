@@ -1,5 +1,6 @@
 """
-第二阶段：读取 detect.py 输出的 JSON，对球员、球拍、网球进行追踪，输出含 track_id 的 JSON。
+第二阶段：读取 detect.py 输出的 JSON，对球员、球拍、网球进行追踪与空间过滤，
+输出含 track_id 的干净 JSON。
 
 用法：
     python track.py -i <video>.detected.json
@@ -12,8 +13,10 @@ import argparse
 import logging
 import os
 import sys
+from collections import defaultdict
 from pathlib import Path
 
+import cv2
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 
@@ -111,6 +114,176 @@ def _smooth_racket_tracks(rackets, fps):
                 det['center'] = [float(cxs[k]), float(cys[k])]
 
     return rackets
+
+
+# ── 空间过滤 ──────────────────────────────────────────────────────────────────
+
+_STATIC_BBOX_DIAG_PX = 20.0  # 静止球判定阈值：轨迹全局包围盒对角线（像素）
+
+
+def _in_hull(hull, x, y):
+    return cv2.pointPolygonTest(hull, (float(x), float(y)), False) >= 0
+
+
+def _bboxes_overlap(a, b):
+    return a[0] < b[2] and a[2] > b[0] and a[1] < b[3] and a[3] > b[1]
+
+
+def _bbox_overlaps_hull(hull, x1, y1, x2, y2):
+    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+    for pt in [(cx, cy), (x1, y1), (x2, y1), (x1, y2), (x2, y2)]:
+        if _in_hull(hull, *pt):
+            return True
+    return False
+
+
+def _make_out_zones(floor_pts, ceil_pts, img_height):
+    """构造左右场外区（侧线外延伸到天空）的四边形 (4,1,2) float32。"""
+    bpts = np.array(floor_pts, dtype=np.float64)
+    tpts = np.array(ceil_pts,  dtype=np.float64)
+    fl_b, fr_b, nr_b, nl_b = bpts
+    fl_t, fr_t, nr_t, nl_t = tpts
+    sky_y = float(-img_height)
+
+    def to_sky(p_b, p_t):
+        dy = p_t[1] - p_b[1]
+        if abs(dy) < 1e-6:
+            return p_t.copy()
+        t = (sky_y - p_t[1]) / dy
+        return p_t + t * (p_t - p_b)
+
+    def quad(a, b, c, d):
+        return np.array([a[:2], b[:2], c[:2], d[:2]],
+                        dtype=np.float32).reshape(-1, 1, 2)
+
+    left_q  = quad(fl_b, nl_b, to_sky(nl_b, nl_t), to_sky(fl_b, fl_t))
+    right_q = quad(fr_b, nr_b, to_sky(nr_b, nr_t), to_sky(fr_b, fr_t))
+    return left_q, right_q
+
+
+def _filter_players(players, left_out, right_out, ground_poly):
+    """返回 (kept, removed)。
+
+    按 track_id 分组，同时满足以下两个条件才认为是球员：
+    1. 轨迹大部分（>50%）底部中心在 ground_poly 内
+    2. 轨迹大部分不落在双打侧线外（左场外区 + 右场外区合计 <= 50%）
+    """
+    track_stats = defaultdict(lambda: {'total': 0, 'in_ground': 0, 'out_side': 0})
+    for frame in players:
+        for d in frame:
+            tid = d.get('track_id')
+            if tid is None:
+                continue
+            cx = (d['bbox'][0] + d['bbox'][2]) / 2
+            cy = d['bbox'][3]
+            s = track_stats[tid]
+            s['total'] += 1
+            if _in_hull(ground_poly, cx, cy):
+                s['in_ground'] += 1
+            if _in_hull(left_out, cx, cy) or _in_hull(right_out, cx, cy):
+                s['out_side'] += 1
+
+    invalid_tracks = set()
+    for tid, s in track_stats.items():
+        total = s['total']
+        if s['in_ground'] / total <= 0.5 or s['out_side'] / total > 0.5:
+            invalid_tracks.add(tid)
+
+    kept, removed = [], []
+    for frame in players:
+        k, r = [], []
+        for d in frame:
+            tid = d.get('track_id')
+            (r if tid in invalid_tracks else k).append(d)
+        kept.append(k)
+        removed.append(r)
+    return kept, removed
+
+
+def _filter_rackets(rackets, clearance_poly, valid_players):
+    """返回 (kept, removed)。
+
+    按 track_id 分组，轨迹中 >50% 的帧同时满足：
+    1. bbox 与 clearance_poly 有交叠
+    2. bbox 与当前帧至少一个有效球员重叠
+    无 track_id 的检测直接移除。
+    """
+    track_total: dict = defaultdict(int)
+    track_valid: dict = defaultdict(int)
+    for frame, players in zip(rackets, valid_players):
+        for d in frame:
+            tid = d.get('track_id')
+            if tid is None:
+                continue
+            track_total[tid] += 1
+            if (_bbox_overlaps_hull(clearance_poly, *d['bbox']) and
+                    any(_bboxes_overlap(d['bbox'], p['bbox']) for p in players)):
+                track_valid[tid] += 1
+
+    invalid_tracks = {
+        tid for tid, total in track_total.items()
+        if track_valid[tid] / total <= 0.5
+    }
+
+    kept, removed = [], []
+    for frame in rackets:
+        k, r = [], []
+        for d in frame:
+            tid = d.get('track_id')
+            if tid is None:
+                r.append(d)
+                continue
+            (r if tid in invalid_tracks else k).append(d)
+        kept.append(k)
+        removed.append(r)
+    return kept, removed
+
+
+def _filter_balls(balls, clearance_poly, left_out, right_out):
+    """返回 (kept, removed)。
+
+    静止轨迹（包围盒对角线 < _STATIC_BBOX_DIAG_PX）→ 无效（场地噪点）。
+    运动轨迹起始点在场外区且不在 clearance_poly 内 → 无效（边线外噪点）。
+    运动轨迹从未进入 clearance_poly → 无效（场外噪点）。
+    无 track_id 的检测直接移除。
+    """
+    track_pts = defaultdict(list)
+    for fi, frame in enumerate(balls):
+        for d in frame:
+            tid = d.get('track_id')
+            if tid is not None and not d.get('interpolated'):
+                cx = (d['bbox'][0] + d['bbox'][2]) / 2
+                cy = (d['bbox'][1] + d['bbox'][3]) / 2
+                track_pts[tid].append((fi, cx, cy))
+
+    invalid_tracks = set()
+    for tid, pts in track_pts.items():
+        if len(pts) < 2:
+            invalid_tracks.add(tid)
+            continue
+        xs = [p[1] for p in pts]
+        ys = [p[2] for p in pts]
+        if np.hypot(max(xs) - min(xs), max(ys) - min(ys)) < _STATIC_BBOX_DIAG_PX:
+            invalid_tracks.add(tid)
+            continue
+        # 运动轨迹：起始点在场外区且不在 clearance_poly 内 → 场外噪点
+        sx, sy = pts[0][1], pts[0][2]
+        if (not _in_hull(clearance_poly, sx, sy)
+                and (_in_hull(left_out, sx, sy) or _in_hull(right_out, sx, sy))):
+            invalid_tracks.add(tid)
+            continue
+        if not any(_in_hull(clearance_poly, p[1], p[2]) for p in pts):
+            invalid_tracks.add(tid)
+
+    kept, removed = [], []
+    for frame in balls:
+        k, r = [], []
+        for d in frame:
+            tid = d.get('track_id')
+            (r if tid is None or tid in invalid_tracks else k).append(d)
+        kept.append(k)
+        removed.append(r)
+    return kept, removed
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -228,6 +401,39 @@ def main():
     ).run(balls,
           rackets=rackets, players=players, court=court,
           debug_frame=args.debug_frame, frames=ball_frames)
+
+    # 空间过滤：无效检测标 valid=False，全部保留在输出中
+    ground_poly    = court['ground_poly']
+    clearance_poly = court['clearance_poly']
+    player_left_out,  player_right_out  = _make_out_zones(
+        court['court_floor_pts'], court['court_ceil_pts'], height)
+    ball_left_out, ball_right_out = _make_out_zones(
+        court['floor_pts'], court['ceil_pts'], height)
+
+    n_p = sum(len(f) for f in players)
+    n_r = sum(len(f) for f in rackets)
+    n_b = sum(len(f) for f in balls)
+    players, players_inv = _filter_players(players, player_left_out, player_right_out, ground_poly)
+    rackets, rackets_inv = _filter_rackets(rackets, clearance_poly, players)
+    balls,   balls_inv   = _filter_balls(balls, clearance_poly, ball_left_out, ball_right_out)
+    print(f"[  filter] players: {n_p} → {sum(len(f) for f in players)}"
+          f"  (invalid={sum(len(f) for f in players_inv)})")
+    print(f"[  filter] rackets: {n_r} → {sum(len(f) for f in rackets)}"
+          f"  (invalid={sum(len(f) for f in rackets_inv)})")
+    print(f"[  filter] balls:   {n_b} → {sum(len(f) for f in balls)}"
+          f"  (invalid={sum(len(f) for f in balls_inv)})")
+
+    for frame in players_inv:
+        for d in frame: d['valid'] = False
+    for frame in rackets_inv:
+        for d in frame: d['valid'] = False
+    for frame in balls_inv:
+        for d in frame: d['valid'] = False
+
+    n_frames = len(players)
+    players = [players[fi] + players_inv[fi] for fi in range(n_frames)]
+    rackets = [rackets[fi] + rackets_inv[fi] for fi in range(n_frames)]
+    balls   = [balls[fi]   + balls_inv[fi]   for fi in range(n_frames)]
 
     save_coco(width, height, players, rackets, balls,
               output_path, fps=fps, court=court,

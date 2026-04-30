@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-从流水线 JSON（track/parse 输出）中提取视频帧，生成 COCO 格式标注数据集。
+从流水线 JSON（track/parse 输出）中提取网球样本，生成 COCO 格式标注数据集。
 
 视频路径从 JSON 的 `video` 字段读取。
 帧过滤：至少含一个网球标注落在指定空间区域的帧才被提取。
---category 控制写出哪些类别的标注（不传则全部写出）。
+输出标注类别固定为 sports ball。
 
 用法：
-    python extract_object.py -i video.tracked.json -o datasets/mydata
-    python extract_object.py -i video.tracked.json -o datasets/mydata -p net
-    python extract_object.py -i video.tracked.json -o datasets/mydata -p racket \\
-        --category "sports ball" "tennis racket"
+    python extract_pos_balls.py -i video.tracked.json -o datasets/mydata
+    python extract_pos_balls.py -i video.tracked.json -o datasets/mydata -p net
+    python extract_pos_balls.py -i video.tracked.json -o datasets/mydata -p backdrop
+    python extract_pos_balls.py -i video.tracked.json -o datasets/mydata -p racket
 """
 
 from __future__ import annotations
@@ -207,7 +207,7 @@ def _resolve_video(json_path: Path) -> Path:
 
 
 def extract_dataset(json_path: Path, out_dir: Path,
-                    filter_mode: str, categories: list[str] | None,
+                    filter_mode: str,
                     conf_high: float = 0.5,
                     sample_mode: str = 'interpolated',
                     max_frames: int = 200) -> None:
@@ -226,16 +226,10 @@ def extract_dataset(json_path: Path, out_dir: Path,
     ball_cids   = {cid for cid, n in cat_name.items() if 'ball'   in n}
     racket_cids = {cid for cid, n in cat_name.items() if 'racket' in n}
 
-    # 输出类别：--category 限定，否则全部
-    if categories:
-        missing = [c for c in categories if c not in cat_name.values()]
-        if missing:
-            raise ValueError(f"JSON 中不存在类别: {missing}  可用: {list(cat_name.values())}")
-        out_cat_ids = {cid for cid, n in cat_name.items() if n in categories}
-        out_cats    = [c for c in all_cats if c['name'] in categories]
-    else:
-        out_cat_ids = None   # None 表示全部
-        out_cats    = all_cats
+    # 输出类别固定为 sports ball
+    out_cats = [c for c in all_cats if c['id'] in ball_cids]
+    if not out_cats:
+        raise ValueError("JSON 中不存在 sports ball 类别")
 
     # 按帧整理标注
     anns_by_frame: dict[int, list] = {}
@@ -314,7 +308,7 @@ def extract_dataset(json_path: Path, out_dir: Path,
             pbar.update(1)
     cap.release()
 
-    # 输出标注：只保留落在区域内的指定类别标注
+    # 输出标注：只保留落在区域内的网球标注
     coco_annotations = []
     for frame_id in kept_frame_ids:
         new_img_id = new_id_map.get(frame_id)
@@ -323,7 +317,7 @@ def extract_dataset(json_path: Path, out_dir: Path,
         frame_anns  = anns_by_frame.get(frame_id, [])
         racket_anns = [a for a in frame_anns if a['category_id'] in racket_cids]
         for ann in frame_anns:
-            if out_cat_ids is not None and ann['category_id'] not in out_cat_ids:
+            if ann['category_id'] not in ball_cids:
                 continue
             if not _ball_in_region(ann, racket_anns, filter_mode, region_poly):
                 continue
@@ -379,8 +373,6 @@ def parse_args():
                    choices=['all', 'net', 'backdrop', 'racket'],
                    help='位置过滤：all=全量  net=球网附近  '
                         'backdrop=远端背景板  racket=球与球拍重叠')
-    p.add_argument('--category', nargs='+', metavar='NAME',
-                   help='输出标注的类别（如 "sports ball" "tennis racket"），不传则全部输出')
     p.add_argument('--sample', default='interpolated',
                    choices=['interpolated', 'low-conf', 'high-conf'],
                    help='帧选择依据：interpolated=插值点  low-conf=低置信度  high-conf=高置信度')
@@ -407,11 +399,10 @@ def main():
     print(f"  position  {args.position}")
     print(f"  sample     {args.sample}")
     print(f"  num-frames {args.num_frames}")
-    print(f"  category   {args.category or '(全部)'}")
     print("─" * 60, flush=True)
 
     try:
-        extract_dataset(json_path, out_dir, args.position, args.category,
+        extract_dataset(json_path, out_dir, args.position,
                         sample_mode=args.sample, max_frames=args.num_frames)
     except (FileNotFoundError, RuntimeError) as e:
         print(f"Error: {e}", file=sys.stderr)
