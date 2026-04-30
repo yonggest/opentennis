@@ -356,10 +356,10 @@ def main():
         load_detections(args.json)
 
     court_kps    = court['keypoints']
-    pts_vol_bot  = court['vol_bottom_pts']
-    pts_vol_top  = court['vol_top_pts']
-    pts_court_bot = np.array(court['court_bottom_pts'])
-    pts_court_top = np.array(court['court_top_pts'])
+    pts_vol_bot  = court['floor_pts']
+    pts_vol_top  = court['ceil_pts']
+    pts_court_bot = np.array(court['court_floor_pts'])
+    pts_court_top = np.array(court['court_ceil_pts'])
     H            = compute_H_from_kps(court_kps)
 
     players     = [[d for d in f if     d['valid']] for f in players_raw]

@@ -69,20 +69,20 @@ def main():
     # 计算缓冲区凸包，写入 JSON，供后续模块直接使用（无需重新依赖常量）
     H = compute_H_from_kps(kps)
     court_det      = CourtDetector.from_H(H)
-    ground_hull    = court_det.get_clearance_hull(back=_FILTER_BACK, side=_FILTER_SIDE)
-    volume_hull, vol_bottom_pts, vol_top_pts = court_det.get_clearance_volume_hull(
+    ground_poly                         = court_det.get_clearance_hull(back=_FILTER_BACK, side=_FILTER_SIDE)
+    clearance_poly, floor_pts, ceil_pts = court_det.get_clearance_volume_hull(
         (height, width), back=_FILTER_BACK, side=_FILTER_SIDE, height=_FILTER_HEIGHT)
-    _, court_bottom_pts, court_top_pts = court_det.get_clearance_volume_hull(
+    _, court_floor_pts, court_ceil_pts  = court_det.get_clearance_volume_hull(
         (height, width), back=_FILTER_BACK, side=0, height=_FILTER_HEIGHT)
 
     court = {
-        'keypoints':        kps,
-        'ground_hull':      ground_hull,
-        'volume_hull':      volume_hull,
-        'vol_bottom_pts':   vol_bottom_pts,
-        'vol_top_pts':      vol_top_pts,
-        'court_bottom_pts': court_bottom_pts,
-        'court_top_pts':    court_top_pts,
+        'keypoints':       kps,
+        'ground_poly':     ground_poly,
+        'clearance_poly':  clearance_poly,
+        'floor_pts':       floor_pts,
+        'ceil_pts':        ceil_pts,
+        'court_floor_pts': court_floor_pts,
+        'court_ceil_pts':  court_ceil_pts,
     }
 
     # ── 物体检测（全部帧，全图推理）──────────────────────────────────────────

@@ -86,7 +86,7 @@ def open_video_writer(path, fps, width, height):
 #   annotations  : [{id, image_id, category_id, bbox [x,y,w,h], area, iscrowd, score}, ...]
 #   categories   : [{id, name, supercategory}, ...]
 #   fps          : float
-#   court        : {keypoints, ground_hull, volume_hull, vol_bottom_pts, vol_top_pts, court_bottom_pts, court_top_pts}  （可选）
+#   court        : {keypoints, ground_poly, clearance_poly, floor_pts, ceil_pts, court_floor_pts, court_ceil_pts}  （可选）
 
 _CATEGORIES = [
     {'id': 1, 'name': 'person',        'supercategory': 'person'},
@@ -100,12 +100,12 @@ def _serialize_court(court):
     """将 court dict 的 numpy 数组序列化为 JSON 可写格式。"""
     out = {
         'keypoints':        np.array(court['keypoints']).reshape(14, 2).tolist(),
-        'ground_hull':      np.array(court['ground_hull']).reshape(-1, 2).tolist(),
-        'volume_hull':      np.array(court['volume_hull']).reshape(-1, 2).tolist(),
-        'vol_bottom_pts':   np.array(court['vol_bottom_pts']).tolist(),
-        'vol_top_pts':      np.array(court['vol_top_pts']).tolist(),
-        'court_bottom_pts': np.array(court['court_bottom_pts']).tolist(),
-        'court_top_pts':    np.array(court['court_top_pts']).tolist(),
+        'ground_poly':      np.array(court['ground_poly']).reshape(-1, 2).tolist(),
+        'clearance_poly':   np.array(court['clearance_poly']).reshape(-1, 2).tolist(),
+        'floor_pts':        np.array(court['floor_pts']).tolist(),
+        'ceil_pts':         np.array(court['ceil_pts']).tolist(),
+        'court_floor_pts':  np.array(court['court_floor_pts']).tolist(),
+        'court_ceil_pts':   np.array(court['court_ceil_pts']).tolist(),
     }
     if 'backdrop_poly' in court and court['backdrop_poly'] is not None:
         out['backdrop_poly'] = court['backdrop_poly']
@@ -118,12 +118,12 @@ def _deserialize_court(raw):
     """将 JSON 中的 court dict 恢复为 numpy 数组。"""
     out = {
         'keypoints':        np.array(raw['keypoints'],        dtype=np.float32).flatten(),
-        'ground_hull':      np.array(raw['ground_hull'],      dtype=np.float32).reshape(-1, 1, 2),
-        'volume_hull':      np.array(raw['volume_hull'],      dtype=np.float32).reshape(-1, 1, 2),
-        'vol_bottom_pts':   np.array(raw['vol_bottom_pts'],   dtype=np.float32),
-        'vol_top_pts':      np.array(raw['vol_top_pts'],      dtype=np.float32),
-        'court_bottom_pts': np.array(raw['court_bottom_pts'], dtype=np.float32),
-        'court_top_pts':    np.array(raw['court_top_pts'],    dtype=np.float32),
+        'ground_poly':      np.array(raw['ground_poly'],      dtype=np.float32).reshape(-1, 1, 2),
+        'clearance_poly':   np.array(raw['clearance_poly'],   dtype=np.float32).reshape(-1, 1, 2),
+        'floor_pts':        np.array(raw['floor_pts'],        dtype=np.float32),
+        'ceil_pts':         np.array(raw['ceil_pts'],         dtype=np.float32),
+        'court_floor_pts':  np.array(raw['court_floor_pts'],  dtype=np.float32),
+        'court_ceil_pts':   np.array(raw['court_ceil_pts'],   dtype=np.float32),
     }
     if 'backdrop_poly' in raw:
         out['backdrop_poly'] = raw['backdrop_poly']
@@ -249,7 +249,7 @@ def load_detections(path):
 
     返回：fps, width, height,
           court_kps  (ndarray float32, shape (28,)),
-          court      (dict，含 keypoints / ground_hull / volume_hull / vol_bottom_pts / vol_top_pts),
+          court      (dict，含 keypoints / ground_poly / clearance_poly / floor_pts / ceil_pts),
           players, rackets, balls  (list[list[dict]])
           每个 det dict 含 bbox [x1,y1,x2,y2] / conf / track_id / valid
     """
